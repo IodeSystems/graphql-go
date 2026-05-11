@@ -2,6 +2,7 @@ package graphql
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -70,6 +71,28 @@ type fieldPlan struct {
 	// back to runtime collectFields).
 	sub                  *selectionPlan
 	abstractAlternatives map[*Object]*selectionPlan
+
+	// responseKeyJSON is the pre-encoded JSON object key for this
+	// field, including the leading quote, escaped key bytes, closing
+	// quote, and trailing colon. Ready to drop between fields in the
+	// append-mode walker. Example: []byte(`"hello":`).
+	responseKeyJSON []byte
+
+	// leafEmitter is non-nil when returnType (after unwrapping NonNull
+	// + List) is a Scalar carrying an AppendJSON hook, or any Enum
+	// (the planner builds an emitter that wraps Enum.Serialize +
+	// appendJSONString). Called with the raw resolver result; writes
+	// the JSON form (or "null" when Serialize would yield nil). nil
+	// for object/abstract returns and for custom scalars without
+	// AppendJSON, in which case the walker falls back to
+	// Serialize + json.Marshal.
+	leafEmitter AppendJSONFn
+
+	// leafType caches the unwrapped leaf type for the
+	// AppendJSON-less scalar fallback path. nil when the field
+	// returns a composite (Object / Interface / Union) or when
+	// leafEmitter is set (the walker uses leafEmitter directly).
+	leafType Leaf
 }
 
 // argPlan separates static arg values (resolvable once, at plan
@@ -288,15 +311,17 @@ func (p *Plan) collectInto(parentType *Object, selectionSet *ast.SelectionSet, v
 				// hasNoFieldDefs branch (skip the response key).
 			}
 			fp := &fieldPlan{
-				responseKey:   responseKey,
-				fieldName:     fieldName,
-				fieldDef:      fieldDef,
-				fieldASTs:     []*ast.Field{sel},
-				skipPredicate: andPredicates(parentPred, pred),
+				responseKey:     responseKey,
+				responseKeyJSON: encodeResponseKeyJSON(responseKey),
+				fieldName:       fieldName,
+				fieldDef:        fieldDef,
+				fieldASTs:       []*ast.Field{sel},
+				skipPredicate:   andPredicates(parentPred, pred),
 			}
 			if fieldDef != nil {
 				fp.returnType = fieldDef.Type
 				fp.args = planArguments(fieldDef.Args, sel.Arguments)
+				fp.leafEmitter, fp.leafType = pickLeafEmitter(fp.returnType)
 			}
 			keyed[responseKey] = len(sp.fields)
 			sp.fields = append(sp.fields, fp)
@@ -375,6 +400,54 @@ func unwrapNamedType(t Output) Output {
 		default:
 			return tt
 		}
+	}
+}
+
+// encodeResponseKeyJSON pre-builds the JSON object-key bytes for a
+// response key — `"key":` ready to drop between fields. Field names
+// are spec-validated identifiers (`/[_A-Za-z][_0-9A-Za-z]*/`), but
+// aliases are arbitrary strings, so we route through the full JSON
+// string escaper.
+func encodeResponseKeyJSON(responseKey string) []byte {
+	out := make([]byte, 0, len(responseKey)+3)
+	out = appendJSONString(out, responseKey)
+	return append(out, ':')
+}
+
+// pickLeafEmitter inspects the unwrapped leaf type of a return type
+// and returns the AppendJSON emitter the planned-append walker
+// should use for it, plus the Leaf reference for the
+// AppendJSON-less fallback path. Returns (nil, nil) for composite
+// returns (Object / Interface / Union); returns (emitter, leaf) for
+// scalars with AppendJSON and for all enums; returns (nil, scalar)
+// for scalars without AppendJSON so the walker can call Serialize
+// directly and json.Marshal the result.
+func pickLeafEmitter(out Output) (AppendJSONFn, Leaf) {
+	leaf := unwrapNamedType(out)
+	switch t := leaf.(type) {
+	case *Scalar:
+		if fn := t.scalarConfig.AppendJSON; fn != nil {
+			return fn, t
+		}
+		return nil, t
+	case *Enum:
+		return makeEnumAppendJSON(t), t
+	}
+	return nil, nil
+}
+
+// makeEnumAppendJSON returns an emitter that JSON-quotes the
+// already-serialized enum name. The walker's writeCompleteLeafValue
+// calls Enum.Serialize before invoking the emitter, so this gets a
+// post-Serialize string (or some non-string the walker already
+// rejected as nil — defensive null fallback).
+func makeEnumAppendJSON(en *Enum) AppendJSONFn {
+	_ = en
+	return func(dst []byte, value interface{}) []byte {
+		if s, ok := value.(string); ok {
+			return appendJSONString(dst, s)
+		}
+		return append(dst, "null"...)
 	}
 }
 
@@ -899,4 +972,414 @@ func completePlannedAbstractValue(eCtx *executionContext, returnType Abstract, f
 	// shouldn't happen in practice since schema rebuilds invalidate
 	// the plan, but stay correct).
 	return map[string]interface{}{}
+}
+
+// ExecutePlanAppend runs a planned operation, appending the GraphQL
+// HTTP-spec response body (`{"data":<data>}` or
+// `{"data":<data>,"errors":[...]}`) to dst and returning the
+// extended slice. The second return is spec-level errors that
+// occurred before data assembly began (e.g. variable coercion
+// failures); when non-empty the caller decides whether to surface
+// them as a separate envelope or fold them into a fresh response.
+// Field-level errors are written into the response bytes via the
+// `errors` array.
+//
+// The walker dethunks resolver thunks eagerly; queries that depend
+// on the breadth-first dethunk traversal of ExecutePlan should keep
+// using ExecutePlan. Mutations run serially in source order, which
+// matches the spec's mutation ordering.
+func ExecutePlanAppend(plan *Plan, p ExecuteParams, dst []byte) ([]byte, []gqlerrors.FormattedError) {
+	if plan == nil {
+		return dst, gqlerrors.FormatErrors(errors.New("graphql: ExecutePlanAppend: plan is nil"))
+	}
+	ctx := p.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	execSchema := *plan.schema
+	variableValues, err := getVariableValues(execSchema, plan.operation.GetVariableDefinitions(), p.Args)
+	if err != nil {
+		return dst, gqlerrors.FormatErrors(err)
+	}
+
+	eCtx := &executionContext{
+		Schema:         execSchema,
+		Fragments:      plan.fragments,
+		Root:           p.Root,
+		Operation:      plan.operation,
+		VariableValues: variableValues,
+		Context:        ctx,
+	}
+
+	dst = append(dst, `{"data":`...)
+	dataStart := len(dst)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Unabsorbed bubble from a non-null root field: data
+				// becomes null per the spec. The error has already been
+				// recorded into eCtx.Errors by the inner handlers (or
+				// will be after this absorb).
+				dst = dst[:dataStart]
+				if e, ok := r.(error); ok {
+					eCtx.Errors = append(eCtx.Errors, gqlerrors.FormatError(e))
+				} else {
+					eCtx.Errors = append(eCtx.Errors, gqlerrors.FormatError(fmt.Errorf("%v", r)))
+				}
+				dst = append(dst, "null"...)
+			}
+		}()
+		dst = writePlannedSelection(eCtx, plan.root, p.Root, plan.rootType, nil, dst)
+	}()
+
+	if len(eCtx.Errors) > 0 {
+		dst = append(dst, `,"errors":`...)
+		errs, marshalErr := json.Marshal(eCtx.Errors)
+		if marshalErr != nil {
+			dst = append(dst, "[]"...)
+		} else {
+			dst = append(dst, errs...)
+		}
+	}
+	dst = append(dst, '}')
+	return dst, nil
+}
+
+// writePlannedSelection emits `{field1:val1,field2:val2,...}` for sp
+// into dst. Skipped fields (skipPredicate false, or unknown fieldDef)
+// emit nothing — no key, no value, no leading comma. Panics from
+// nested writes propagate; the nearest writeCompleteValueCatchingError
+// (or the ExecutePlanAppend top-level absorber) catches and rolls
+// back via its entry-length record.
+func writePlannedSelection(eCtx *executionContext, sp *selectionPlan, source interface{}, parentType *Object, path *ResponsePath, dst []byte) []byte {
+	if sp == nil {
+		return append(dst, '{', '}')
+	}
+	if source == nil {
+		source = map[string]interface{}{}
+	}
+	dst = append(dst, '{')
+	wrote := false
+	for _, fp := range sp.fields {
+		if fp.skipPredicate != nil && !fp.skipPredicate(eCtx.VariableValues) {
+			continue
+		}
+		if fp.fieldDef == nil {
+			continue
+		}
+		commaPos := -1
+		if wrote {
+			commaPos = len(dst)
+			dst = append(dst, ',')
+		}
+		beforeField := len(dst)
+		dst = writePlannedField(eCtx, parentType, source, fp, path, dst)
+		if len(dst) == beforeField {
+			// Field declined to emit (defensive — writePlannedField
+			// always writes key+value or panics). Strip the comma we
+			// just laid down so the output stays valid JSON.
+			if commaPos >= 0 {
+				dst = dst[:commaPos]
+			}
+		} else {
+			wrote = true
+		}
+	}
+	return append(dst, '}')
+}
+
+// writePlannedField emits `"responseKey":value` for fp into dst.
+// Resolver and completion panics are absorbed when fp.returnType is
+// nullable: the field's bytes are rolled back, an error is recorded
+// in eCtx.Errors, and `"responseKey":null` is emitted instead. For
+// NonNull fp.returnType the panic re-propagates (handleFieldError
+// re-panics) so the next nullable boundary above can absorb it.
+func writePlannedField(eCtx *executionContext, parentType *Object, source interface{}, fp *fieldPlan, path *ResponsePath, dst []byte) (out []byte) {
+	fieldPath := path.WithKey(fp.responseKey)
+	keyStart := len(dst)
+
+	info := ResolveInfo{
+		FieldName:      fp.fieldName,
+		FieldASTs:      fp.fieldASTs,
+		Path:           fieldPath,
+		ReturnType:     fp.returnType,
+		ParentType:     parentType,
+		Schema:         eCtx.Schema,
+		Fragments:      eCtx.Fragments,
+		RootValue:      eCtx.Root,
+		Operation:      eCtx.Operation,
+		VariableValues: eCtx.VariableValues,
+	}
+
+	out = dst
+	defer recoverPlannedField(&out, keyStart, fp, fieldPath, eCtx)
+
+	fieldDef := fp.fieldDef
+	resolveFn := fieldDef.Resolve
+	if resolveFn == nil {
+		resolveFn = DefaultResolveFn
+	}
+
+	var args map[string]interface{}
+	switch {
+	case fp.args.hasVariables:
+		args = getArgumentValues(fp.args.fieldDefArgs, fp.args.argASTs, eCtx.VariableValues)
+	case fp.args.static != nil:
+		args = make(map[string]interface{}, len(fp.args.static))
+		for k, v := range fp.args.static {
+			args[k] = v
+		}
+	default:
+		args = map[string]interface{}{}
+	}
+
+	var resolveFieldFinishFn resolveFieldFinishFuncHandler
+	if len(eCtx.Schema.extensions) > 0 {
+		// Slow path: extensions take *ResolveInfo and may mutate or
+		// retain it. Use a separate heap-resident copy so the outer
+		// info can stay on the stack for the common no-extensions
+		// path.
+		infoForExt := info
+		extErrs, fn := handleExtensionsResolveFieldDidStart(eCtx.Schema.extensions, eCtx, &infoForExt)
+		if len(extErrs) != 0 {
+			eCtx.Errors = append(eCtx.Errors, extErrs...)
+		}
+		resolveFieldFinishFn = fn
+		info = infoForExt
+	}
+
+	result, resolveFnError := resolveFn(ResolveParams{
+		Source:  source,
+		Args:    args,
+		Info:    info,
+		Context: eCtx.Context,
+	})
+
+	if resolveFieldFinishFn != nil {
+		extErrs := resolveFieldFinishFn(result, resolveFnError)
+		if len(extErrs) != 0 {
+			eCtx.Errors = append(eCtx.Errors, extErrs...)
+		}
+	}
+	if resolveFnError != nil {
+		panic(resolveFnError)
+	}
+
+	out = append(dst, fp.responseKeyJSON...)
+	out = writeCompleteValueCatchingError(eCtx, fp.returnType, fp, info, fieldPath, result, out)
+	return out
+}
+
+// writeCompleteValueCatchingError mirrors completePlannedValueCatchingError
+// for append-mode. On panic it rolls dst back to entry length and
+// forwards via handleFieldError; nullable returnType triggers a
+// `null` emission here (and an error recorded), NonNull returnType
+// re-panics for the parent to absorb.
+func writeCompleteValueCatchingError(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte) (out []byte) {
+	out = dst
+	entryLen := len(dst)
+	defer recoverCompleteValue(&out, entryLen, fp, path, returnType, eCtx)
+	out = writeCompleteValue(eCtx, returnType, fp, info, path, result, out, false)
+	return out
+}
+
+// recoverPlannedField absorbs a panic from writePlannedField's
+// resolver / completion path. Rolls *out back to keyStart, forwards
+// the panic value to handleFieldError, and (for nullable returnType
+// only — NonNull paths re-panic from handleFieldError) emits
+// `"responseKey":null`. Lifted out of a closure so the defer record
+// can be open-coded onto the stack.
+func recoverPlannedField(out *[]byte, keyStart int, fp *fieldPlan, fieldPath *ResponsePath, eCtx *executionContext) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	*out = (*out)[:keyStart]
+	handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), fieldPath, fp.returnType, eCtx)
+	*out = append(*out, fp.responseKeyJSON...)
+	*out = append(*out, "null"...)
+}
+
+// recoverCompleteValue is the writeCompleteValueCatchingError
+// counterpart to recoverPlannedField: rolls *out back to entryLen,
+// records the error (or re-panics for NonNull), and emits `null` at
+// the absorption point. Named-function defer keeps the record on
+// the stack.
+func recoverCompleteValue(out *[]byte, entryLen int, fp *fieldPlan, path *ResponsePath, returnType Type, eCtx *executionContext) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	*out = (*out)[:entryLen]
+	handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), path, returnType, eCtx)
+	*out = append(*out, "null"...)
+}
+
+// writeCompleteValue mirrors completePlannedValue for append-mode.
+// nonNull is true when the immediate wrapper was a *NonNull (set
+// when we strip a NonNull layer and recurse). Leaf writes use the
+// flag to distinguish "Serialize returned nil under NonNull"
+// (panic) from "Serialize returned nil under nullable" (emit
+// "null").
+func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte, nonNull bool) []byte {
+	rv := reflect.ValueOf(result)
+	if rv.IsValid() && rv.Kind() == reflect.Func {
+		propertyFn, ok := result.(func() (interface{}, error))
+		if !ok {
+			err := gqlerrors.NewFormattedError("Error resolving func. Expected `func() (interface{}, error)` signature")
+			panic(gqlerrors.FormatError(err))
+		}
+		fnResult, fnErr := propertyFn()
+		if fnErr != nil {
+			panic(gqlerrors.FormatError(fnErr))
+		}
+		result = fnResult
+	}
+
+	if rt, ok := returnType.(*NonNull); ok {
+		if isNullish(result) {
+			err := NewLocatedErrorWithPath(
+				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
+				FieldASTsToNodeASTs(fp.fieldASTs),
+				path.AsArray(),
+			)
+			panic(gqlerrors.FormatError(err))
+		}
+		return writeCompleteValue(eCtx, rt.OfType, fp, info, path, result, dst, true)
+	}
+
+	if isNullish(result) {
+		return append(dst, "null"...)
+	}
+
+	switch rt := returnType.(type) {
+	case *List:
+		return writeCompleteListValue(eCtx, rt, fp, info, path, result, dst)
+	case *Scalar:
+		return writeCompleteLeafValue(eCtx, rt, fp, info, path, result, dst, nonNull)
+	case *Enum:
+		return writeCompleteLeafValue(eCtx, rt, fp, info, path, result, dst, nonNull)
+	case *Object:
+		return writeCompleteObjectValue(eCtx, rt, fp, info, path, result, dst)
+	case *Interface:
+		return writeCompleteAbstractValue(eCtx, rt, fp, info, path, result, dst)
+	case *Union:
+		return writeCompleteAbstractValue(eCtx, rt, fp, info, path, result, dst)
+	}
+	if err := invariantf(false, `Cannot complete value of unexpected type "%v."`, returnType); err != nil {
+		panic(gqlerrors.FormatError(err))
+	}
+	return dst
+}
+
+// writeCompleteLeafValue serializes result via returnType.Serialize
+// and emits the JSON form via fp.leafEmitter (or json.Marshal
+// fallback when no emitter is registered). Post-Serialize nil is
+// the spec's "Serialize failed" case: under NonNull it panics, else
+// "null" is emitted.
+func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte, nonNull bool) []byte {
+	serialized := returnType.Serialize(result)
+	if isNullish(serialized) {
+		if nonNull {
+			err := NewLocatedErrorWithPath(
+				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
+				FieldASTsToNodeASTs(fp.fieldASTs),
+				path.AsArray(),
+			)
+			panic(gqlerrors.FormatError(err))
+		}
+		return append(dst, "null"...)
+	}
+	if fp.leafEmitter != nil {
+		return fp.leafEmitter(dst, serialized)
+	}
+	bs, mErr := json.Marshal(serialized)
+	if mErr != nil {
+		if nonNull {
+			err := NewLocatedErrorWithPath(
+				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
+				FieldASTsToNodeASTs(fp.fieldASTs),
+				path.AsArray(),
+			)
+			panic(gqlerrors.FormatError(err))
+		}
+		return append(dst, "null"...)
+	}
+	return append(dst, bs...)
+}
+
+// writeCompleteListValue mirrors completePlannedListValue. Each item
+// completes via writeCompleteValueCatchingError, so nullable items
+// can absorb item-level non-null violations while non-null items
+// propagate the bubble up to the list's containing field.
+func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte) []byte {
+	resultVal := reflect.ValueOf(result)
+	if resultVal.Kind() == reflect.Ptr {
+		resultVal = resultVal.Elem()
+	}
+	parentTypeName := ""
+	if info.ParentType != nil {
+		parentTypeName = info.ParentType.Name()
+	}
+	if err := invariantf(
+		resultVal.IsValid() && isIterable(result),
+		"User Error: expected iterable, but did not find one "+
+			"for field %v.%v.", parentTypeName, info.FieldName); err != nil {
+		panic(gqlerrors.FormatError(err))
+	}
+	itemType := returnType.OfType
+	dst = append(dst, '[')
+	for i := 0; i < resultVal.Len(); i++ {
+		if i > 0 {
+			dst = append(dst, ',')
+		}
+		val := resultVal.Index(i).Interface()
+		itemPath := path.WithKey(i)
+		dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, itemPath, val, dst)
+	}
+	return append(dst, ']')
+}
+
+func writeCompleteObjectValue(eCtx *executionContext, returnType *Object, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte) []byte {
+	if returnType.IsTypeOf != nil {
+		p := IsTypeOfParams{Value: result, Info: info, Context: eCtx.Context}
+		if !returnType.IsTypeOf(p) {
+			panic(gqlerrors.NewFormattedError(
+				fmt.Sprintf(`Expected value of type "%v" but got: %T.`, returnType, result),
+			))
+		}
+	}
+	if fp.sub != nil {
+		return writePlannedSelection(eCtx, fp.sub, result, returnType, path, dst)
+	}
+	return append(dst, '{', '}')
+}
+
+func writeCompleteAbstractValue(eCtx *executionContext, returnType Abstract, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte) []byte {
+	var runtimeType *Object
+	rtParams := ResolveTypeParams{Value: result, Info: info, Context: eCtx.Context}
+	if u, ok := returnType.(*Union); ok && u.ResolveType != nil {
+		runtimeType = u.ResolveType(rtParams)
+	} else if i, ok := returnType.(*Interface); ok && i.ResolveType != nil {
+		runtimeType = i.ResolveType(rtParams)
+	} else {
+		runtimeType = defaultResolveTypeFn(rtParams, returnType)
+	}
+	if err := invariantf(runtimeType != nil,
+		`Abstract type %v must resolve to an Object type at runtime `+
+			`for field %v.%v with value "%v", received "%v".`,
+		returnType, info.ParentType, info.FieldName, result, runtimeType,
+	); err != nil {
+		panic(err)
+	}
+	if !eCtx.Schema.IsPossibleType(returnType, runtimeType) {
+		panic(gqlerrors.NewFormattedError(
+			fmt.Sprintf(`Runtime Object type "%v" is not a possible type for "%v".`, runtimeType, returnType),
+		))
+	}
+	if sub, ok := fp.abstractAlternatives[runtimeType]; ok && sub != nil {
+		return writePlannedSelection(eCtx, sub, result, runtimeType, path, dst)
+	}
+	return append(dst, '{', '}')
 }

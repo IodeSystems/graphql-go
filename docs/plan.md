@@ -299,15 +299,66 @@ hardware as Phase 1):
 | WideQuery_100_10_StaticArg | −33 % | −61 % | −33 % |
 | ListQuery_1K | −58 % | −88 % | −47 % |
 
-**Followups.**
-- **Args map.** `make(map[string]interface{}, ...)` and the
-  empty-args `map[string]interface{}{}` are still 1 alloc per
-  field. A pool needs a contract change ("resolver must not retain
-  p.Args") to be safe — punt unless adopters need it.
-- **`ResponsePath.WithKey`.** ~21 % of remaining allocs. Lazy
-  materialization (build the path only when an error references it)
-  would help, but it touches `ResolveInfo.Path` which is a
-  documented resolver field. Out of scope for append-mode alone.
+### Investigation backlog
+
+Ranked by win-to-risk ratio. Pull from the top when there's appetite
+for another round; each entry stands alone and can ship without the
+others. Numbers below are post-Phase-2 alloc-profile shares on
+`BenchmarkPlannedAppend_WideQuery_100_10`.
+
+1. **Inline scalar emit fast path for built-ins.** Cleanest win-to-risk
+   ratio. `writeCompleteLeafValue` calls `returnType.Serialize` then
+   `fp.leafEmitter`; for `String`/`Int`/`Float`/`Boolean`/`ID` the two
+   amount to the same coercion done twice. A pointer-equality fast
+   path (`switch fp.leafType { case String: appendJSONString(dst,
+   raw.(string)) }`) skips the redundant call.
+
+   **Expected:** ~5–10 % CPU saved (the `coerceString` / `coerceFloat`
+   entries in the alloc profile). Zero contract change, zero risk.
+
+2. **`ResponsePath.WithKey` lazy materialization.** ~21 % of remaining
+   append-mode allocs. Each resolved field today builds a fresh
+   `*ResponsePath{Prev, Key}`; for error-free responses every one is
+   wasted.
+
+   Plan: replace `info.Path` with a value-type "path cursor"
+   (`{prev *ResponsePath, key interface{}}` — on the stack) that
+   `WithKey` returns by value; only materialize the linked
+   `*ResponsePath` lazily inside `path.AsArray()` (the only error-side
+   consumer) and inside `info.Path` if a resolver reads it.
+
+   **Risk:** `info.Path` is a documented resolver field. Survey: how
+   many adopters read it on the happy path? If "few," ship an opt-in
+   flag (`ExecuteParams.LazyPath bool`) that swaps in the cursor type.
+   Out of scope for append-mode alone, but the biggest single number.
+
+3. **Args map pool (with contract change).** `make(map[string]interface{},
+   ...)` and `map[string]interface{}{}` are still 1 alloc per field
+   (~1000 allocs on the wide bench). A `sync.Pool` of args maps with a
+   clean-and-return discipline reclaims that, *if* resolvers agree not
+   to retain `p.Args` past the resolve call.
+
+   **Risk:** breaks any resolver that stashes `p.Args` in a struct
+   field. Mitigate by gating behind a per-schema flag (`PoolArgs
+   bool`) or a `ResolveAppend`-only path (Phase 3).
+
+4. **Plan-time partial-literal arg pre-coercion.** Today
+   `planArguments` is all-or-nothing: any `$variable` reference
+   forces full `getArgumentValues` at execute time. Pre-coercing the
+   literal subset cuts per-request coercion work on mixed arg lists.
+   Mostly helps multi-arg fields with one variable.
+
+   **Risk:** low. Mechanical refactor of `planArguments`.
+
+5. **Direct `DateTime` format into dst.** The current emitter calls
+   `t.MarshalText` then `appendJSONString(string(buf))`, paying one
+   allocation per `DateTime` field. A direct format-into-`dst` version
+   trims it. Doesn't dominate any bench but cheap and adopter-friendly.
+
+6. **Direct error-array emit on the envelope tail.** `json.Marshal(eCtx.Errors)`
+   in `ExecutePlanAppend` is only hit when errors exist, so not on the
+   hot path — but for error-heavy callers a direct
+   `appendFormattedErrors` would skip another reflective walk.
 
 ### Phase 3 — Resolver-side append API (~3-5 days)
 

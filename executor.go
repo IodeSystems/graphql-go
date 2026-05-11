@@ -22,15 +22,28 @@ type ExecuteParams struct {
 	// information to resolve functions.
 	Context context.Context
 
-	// LazyPath, when true, opts the append-mode executor
-	// (ExecutePlanAppend) into a depth-stack representation of the
-	// response path: ResolveInfo.Path is left nil for every resolver
-	// call, and *ResponsePath nodes are only materialized when an
-	// error fires. Reclaims one alloc per resolved field and per list
-	// item. Contract: every resolver in the schema must tolerate a
-	// nil info.Path — DataLoader / tracing / federation patterns that
-	// key on info.Path are incompatible. Has no effect on ExecutePlan.
-	LazyPath bool
+	// PreserveInfoPath disables the append-mode executor's depth-stack
+	// path representation and restores per-field *ResponsePath
+	// allocation so ResolveInfo.Path is populated for every resolver
+	// call (today's spec contract). The default — false — leaves
+	// info.Path nil under ExecutePlanAppend and reclaims one alloc
+	// per resolved field and per list item. Set true if any resolver
+	// in the schema reads info.Path (DataLoader keyed on path,
+	// tracing spans, federation refs). Has no effect on ExecutePlan,
+	// which always populates info.Path.
+	PreserveInfoPath bool
+
+	// ConcurrentThunks restores the thunk-concurrency contract under
+	// the append-mode executor by delegating to ExecutePlan +
+	// json.Marshal: thunked resolvers (`func() (interface{}, error)`)
+	// run with breadth-first dethunking so their internal goroutines
+	// overlap. The default — false — dethunks synchronously as
+	// resolvers return, which is correct for thunks that only defer
+	// work (no concurrency) but loses the documented parallelism
+	// pattern (see examples/concurrent-resolvers). Set true when the
+	// schema's thunks kick off goroutines and rely on the dethunk
+	// pass for parallel execution. Has no effect on ExecutePlan.
+	ConcurrentThunks bool
 }
 
 // Execute runs an operation against a schema. Behavior is unchanged

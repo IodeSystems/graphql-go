@@ -331,61 +331,101 @@ Delta vs Phase 2 alone: ~10 % additional ns/op on the wide queries,
 Exceeded the predicted 5–10 % CPU because the String Sprintf alloc
 was bigger than the alloc profile read suggested.
 
-### Phase 4 — Lazy `ResponsePath` (opt-in `LazyPath` flag)
+### Phase 4 — Lazy `ResponsePath` (default-on; `PreserveInfoPath` opt-out)
+
+**Optimization policy:** new perf knobs ship **fast by default** with
+an opt-out flag callers can flip when the underlying contract isn't
+safe for their schema. `PreserveInfoPath` is the first knob in that
+mold — see also `ConcurrentThunks` below.
 
 **Done.**
-- [x] **`ExecuteParams.LazyPath bool`** opts append-mode into a
-  depth-stack representation of the response path. The walker stops
-  threading `*ResponsePath` and pushes raw keys into
-  `eCtx.pathBuf` instead; `ResolveInfo.Path` is left **nil** for
-  every resolver call.
-- [x] **`*ResponsePath` is no longer built on the happy path** under
-  `LazyPath=true`. Reclaims ~1 alloc per resolved field and per list
-  item (~1011 of the 3738 allocs on `BenchmarkPlannedAppend_WideQuery_100_10`,
-  ~2000 on `ListQuery_1K`).
-- [x] **Error envelope `path` still spec-correct.** `eCtx.errorPathArray`
-  snapshots `pathBuf` (single slice copy, depth-bounded) at the
-  moment an error fires; bytes are identical to the linked-list
-  `AsArray` output.
-- [x] **Parity coverage.** `runParity` now cross-runs every existing
-  test under `LazyPath=true` and asserts JSON equivalence with both
-  the default append path and `ExecutePlan`. New tests pin the
-  contract: `info.Path` is non-nil in default mode and nil under
-  `LazyPath`; error envelopes carry the same path locator either
-  way.
+- [x] **Depth-stack response path is the default** under
+  `ExecutePlanAppend`. The walker pushes raw keys into `eCtx.pathBuf`
+  and skips per-field `*ResponsePath` allocation; `ResolveInfo.Path`
+  is left **nil** for every resolver call. Reclaims ~1 alloc per
+  resolved field and per list item (~1011 of the original 3738 allocs
+  on `BenchmarkPlannedAppend_WideQuery_100_10`, ~2000 on
+  `ListQuery_1K`).
+- [x] **`ExecuteParams.PreserveInfoPath bool`** disables the
+  optimization and restores the original behavior — per-field
+  `*ResponsePath` alloc, populated `info.Path`. Set this when the
+  schema has resolvers that key DataLoader cache entries on
+  `info.Path`, build tracing spans from it, or stitch federation
+  refs through it.
+- [x] **Error envelope `path` is spec-correct in both modes.**
+  `eCtx.errorPathArray` snapshots `pathBuf` (single slice copy,
+  depth-bounded) under the default path; under `PreserveInfoPath` it
+  walks the linked-list `AsArray` as before. Bytes are identical.
+- [x] **Parity coverage.** `runParity` cross-runs every existing test
+  under both modes and asserts JSON equivalence with `ExecutePlan`.
+  Dedicated tests pin the `info.Path` contract: nil by default,
+  populated under `PreserveInfoPath`.
 
-**Contract caveat.** `LazyPath` is an explicit "no resolver in this
-schema reads `info.Path`" assertion by the caller. Resolvers that
-key DataLoader cache entries, tracing spans, or federation refs on
-`info.Path` will nil-deref. Default is `false` (today's behavior),
-so nothing existing breaks unless callers opt in.
+**Contract caveat.** Default behavior is a silent-nil for resolvers
+reading `info.Path`. The trade-off is intentional — the alternative
+(opt-in optimization) leaves the speed on the floor for every
+adopter who doesn't hear about it. If a resolver nil-derefs after
+upgrade, flip `PreserveInfoPath=true` and file an issue.
 
-**Headline numbers** (vs `ExecutePlan` map-tree baseline, same
-hardware as Phase 1; `LazyPath=true`):
+**Headline numbers** (vs `ExecutePlan` map-tree baseline; default
+`PreserveInfoPath=false`):
 
 | Bench | ns/op Δ | B/op Δ | allocs/op Δ |
 |---|---|---|---|
-| WideQuery_100_10 | −58 % | −90 % | −61 % |
+| WideQuery_100_10 | −67 % | −90 % | −61 % |
 | WideQuery_100_10_Varied | −45 % | −64 % | −55 % |
 | WideQuery_100_10_StaticArg | −46 % | −64 % | −55 % |
 | ListQuery_1K | −64 % | −91 % | −68 % |
 
-Delta `LazyPath=true` vs `LazyPath=false` on the same change:
-ns/op −11 % to −13 %, B/op −25 % to −27 %, allocs/op −22 % to −32 %.
-`ListQuery_1K` wins the most because the list-index push fires once
-per item.
+`PreserveInfoPath=true` (opt-out) trades back ~25-30 % of the ns/op
+gains and the reclaimed allocs to restore the `info.Path` contract.
 
 **Followups / caveats.**
-- Default mode (`LazyPath=false`) carries a small CPU regression
-  (~3 % on wide, ~6 % on list) from the per-push branch on
-  `eCtx.lazyPath` and the extra `pathEntry` plumbing into the
-  recover handlers. Alloc count and B/op are unchanged. Acceptable
-  for an opt-in feature; if the regression bothers anyone, the two
-  walker sites can be split into separate functions per mode.
-- A future refinement could pool `eCtx.pathBuf` across requests via
-  `sync.Pool`; the buffer's depth-bounded capacity makes it a clean
-  pool target. Not done because the bench numbers already reclaimed
-  the alloc — the buffer's growth is one alloc/request amortized.
+- The `if !eCtx.lazyPath { ... } else { ... }` branch at each push
+  site is a one-instruction overhead; bench shows it's in the noise
+  vs. either pure mode. If it ever shows up on a profile, the two
+  modes can be split into separate walker functions.
+- `eCtx.pathBuf` is one slice alloc per request (depth-bounded
+  capacity). Could be pooled via `sync.Pool` for a tiny additional
+  win; tracked in the investigation backlog.
+
+### Phase 5 — Concurrent thunks (default-eager; `ConcurrentThunks` opt-out)
+
+**Done.**
+- [x] **`ExecuteParams.ConcurrentThunks bool`** routes
+  `ExecutePlanAppend` through `ExecutePlan` + `json.Marshal`,
+  restoring the documented breadth-first dethunk pass. Schemas
+  whose resolvers return `func() (interface{}, error)` thunks that
+  kick off goroutines (the `examples/concurrent-resolvers` pattern)
+  must set this — otherwise the append-mode walker dethunks
+  synchronously and the resolver-side goroutines run serially in
+  practice (correct values, no parallelism).
+- [x] **Default stays eager-dethunk.** Append-mode keeps the
+  inline single-pass walk that drives Phases 1–4's wins. Schemas
+  that don't use thunks for concurrency (the common case — and the
+  gateway adopter pattern this work was sized against) pay nothing.
+
+**Why delegation, not a parallel-aware walker.** A two-pass append
+walker (collect resolved values + thunks into an intermediate tree,
+breadth-first dethunk, then emit bytes) would preserve some of
+Phases 1–4's wins for thunk users. Honest cost analysis: the
+intermediate-tree allocs largely eat those wins, leaving append-mode
+roughly on par with `ExecutePlan` for thunk-using schemas anyway.
+Delegating is one screenful of code and ships the correct semantics
+today; the heavier walker is on the table if a real workload shows
+the delegated path is the bottleneck.
+
+**Trade-off (vs. `ExecutePlan`).** `ConcurrentThunks=true` gives up
+the append-mode wedge in exchange for thunk concurrency:
+
+- Bytes go through `json.Marshal(Result.Data)` instead of the
+  leaf-emitter fast path — same alloc/CPU profile as `ExecutePlan +
+  graphql.Do`.
+- Spec-level errors (variable-coercion failures, missing operation,
+  etc.) land in the envelope's `errors` array instead of the
+  second return value of `ExecutePlanAppend`. `ExecutePlan` merges
+  the two categories into `Result.Errors` and we don't try to
+  re-split them.
 
 ### Investigation backlog
 
@@ -402,7 +442,7 @@ others. Numbers below are post-Phase-4 alloc-profile shares on
 
    **Risk:** breaks any resolver that stashes `p.Args` in a struct
    field. Mitigate by gating behind a per-schema flag (`PoolArgs
-   bool`) or a `ResolveAppend`-only path (Phase 5).
+   bool`) or a `ResolveAppend`-only path (Phase 6).
 
 2. **Plan-time partial-literal arg pre-coercion.** Today
    `planArguments` is all-or-nothing: any `$variable` reference
@@ -427,7 +467,7 @@ others. Numbers below are post-Phase-4 alloc-profile shares on
    capacity makes the pool's discipline trivial. Marginal win — the
    single-slice alloc is small — but cheap.
 
-### Phase 5 — Resolver-side append API (~3-5 days)
+### Phase 6 — Resolver-side append API (~3-5 days)
 
 Opt-in. Lets downstream resolvers write JSON directly to the buffer
 instead of returning `interface{}`. Removes the last boxing step and
@@ -480,7 +520,7 @@ end-to-end wedge cited in the gateway's perf docs.
    `bytes.Buffer` and `Write` at the end; adopters wanting
    `http.ResponseWriter` write to a pooled buffer then one
    `w.Write(buf)`.
-5. **`ResolveAppend` API stability** (Phase 5). Once exposed, hard
+5. **`ResolveAppend` API stability** (Phase 6). Once exposed, hard
    to remove. Mitigation: keep it experimental — package doc warns
    that the signature may change pre-1.0 of this fork; existing
    `Resolve` remains the documented stable surface.
@@ -520,12 +560,15 @@ end-to-end wedge cited in the gateway's perf docs.
 | `plan_append_test.go` | 1 | Cross-run parity helper + coverage matrix. | landed |
 | `plan.go` | 2 | Hoist `&info` into the extensions slow-path branch; open-code the per-field recover (was scoped as `ResolveParams` + args-map pools; pivoted — see Phase 2). | landed |
 | `plan.go` | 3 | Inline canonical-Go-type fast path in `writeCompleteLeafValue` for `String` / `ID` / `Int` / `Float` / `Boolean`. | landed |
-| `executor.go` | 4 | Add `ExecuteParams.LazyPath`; add `lazyPath` / `pathBuf` to `executionContext`; add `popPath` / `errorPathArray` helpers; route `handleFieldError` through `errorPathArray`. | landed |
-| `plan.go` | 4 | Branch on `eCtx.lazyPath` at `writePlannedField` + `writeCompleteListValue` push sites; thread `pathEntry` through `recoverPlannedField` / `recoverCompleteValue` for the unwind. | landed |
-| `plan_append_test.go` | 4 | `runParity` cross-runs `LazyPath=true`; new tests pin `info.Path` contract and error-location parity. | landed |
-| `plan_bench_test.go` | 4 | `BenchmarkPlannedAppendLazy_*` siblings. | landed |
-| `definition.go` | 5 | Add `ResolveAppend` to `FieldDefinition` (`Field`). | pending |
-| `plan.go` | 5 | Walker branches on `ResolveAppend` presence. | pending |
+| `executor.go` | 4 | Add `ExecuteParams.PreserveInfoPath` (opt-out); add `lazyPath` / `pathBuf` to `executionContext`; add `popPath` / `errorPathArray` helpers; route `handleFieldError` through `errorPathArray`. | landed |
+| `plan.go` | 4 | Branch on `eCtx.lazyPath` at `writePlannedField` + `writeCompleteListValue` push sites; thread `pathEntry` through `recoverPlannedField` / `recoverCompleteValue` for the unwind. Default-on; `PreserveInfoPath=true` restores legacy behavior. | landed |
+| `plan_append_test.go` | 4 | `runParity` cross-runs `PreserveInfoPath=true`; dedicated tests pin `info.Path` contract and error-location parity. | landed |
+| `plan_bench_test.go` | 4 | `BenchmarkPlannedAppendEager_*` siblings (PreserveInfoPath=true) measure opt-out cost. | landed |
+| `executor.go` | 5 | Add `ExecuteParams.ConcurrentThunks` (opt-out). | landed |
+| `plan.go` | 5 | `executePlanAppendViaResult` delegate that runs `ExecutePlan` + `json.Marshal` when the caller opts back into the breadth-first dethunk pass. | landed |
+| `plan_append_test.go` | 5 | `TestAppendConcurrentThunks` exercises the thunk path and cross-checks default-mode (eager) parity. | landed |
+| `definition.go` | 6 | Add `ResolveAppend` to `FieldDefinition` (`Field`). | pending |
+| `plan.go` | 6 | Walker branches on `ResolveAppend` presence. | pending |
 
 ### Append-mode invariants (for reviewers)
 

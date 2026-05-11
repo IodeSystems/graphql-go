@@ -403,12 +403,13 @@ func BenchmarkPlannedAppend_WideQuery_100_10_StaticArg(b *testing.B) {
 	}
 }
 
-// BenchmarkPlannedAppendLazy_* mirrors BenchmarkPlannedAppend_* with
-// ExecuteParams.LazyPath=true: ResolveInfo.Path is nil for resolvers
-// and *ResponsePath nodes are only built on error. Measures the
-// upper-bound win when no resolver consults info.Path.
+// BenchmarkPlannedAppendEager_* mirrors BenchmarkPlannedAppend_* with
+// ExecuteParams.PreserveInfoPath=true: opts out of the depth-stack
+// path representation, restoring per-field *ResponsePath allocation
+// for resolvers that read info.Path. Measures the cost of disabling
+// the default optimization.
 
-func BenchmarkPlannedAppendLazy_WideQuery_100_10(b *testing.B) {
+func BenchmarkPlannedAppendEager_WideQuery_100_10(b *testing.B) {
 	schema := benchutil.WideSchemaWithXFieldsAndYItems(100, 10)
 	query := benchutil.WideSchemaQuery(100)
 
@@ -428,9 +429,9 @@ func BenchmarkPlannedAppendLazy_WideQuery_100_10(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		buf = buf[:0]
 		out, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
-			Schema:   schema,
-			AST:      doc,
-			LazyPath: true,
+			Schema:           schema,
+			AST:              doc,
+			PreserveInfoPath: true,
 		}, buf)
 		if len(specErrs) > 0 {
 			b.Fatalf("spec errors: %v", specErrs)
@@ -439,7 +440,7 @@ func BenchmarkPlannedAppendLazy_WideQuery_100_10(b *testing.B) {
 	}
 }
 
-func BenchmarkPlannedAppendLazy_ListQuery_1K(b *testing.B) {
+func BenchmarkPlannedAppendEager_ListQuery_1K(b *testing.B) {
 	schema := benchutil.ListSchemaWithXItems(1000)
 	query := `query { colors { hex r g b } }`
 
@@ -459,9 +460,9 @@ func BenchmarkPlannedAppendLazy_ListQuery_1K(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		buf = buf[:0]
 		out, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
-			Schema:   schema,
-			AST:      doc,
-			LazyPath: true,
+			Schema:           schema,
+			AST:              doc,
+			PreserveInfoPath: true,
 		}, buf)
 		if len(specErrs) > 0 {
 			b.Fatalf("spec errors: %v", specErrs)
@@ -470,7 +471,7 @@ func BenchmarkPlannedAppendLazy_ListQuery_1K(b *testing.B) {
 	}
 }
 
-func BenchmarkPlannedAppendLazy_WideQuery_100_10_Varied(b *testing.B) {
+func BenchmarkPlannedAppendEager_WideQuery_100_10_Varied(b *testing.B) {
 	schema := benchutil.WideArgedSchemaWithXFieldsAndYItems(100, 10)
 	query := benchutil.WideArgedSchemaQueryWithVariable(100)
 
@@ -490,10 +491,10 @@ func BenchmarkPlannedAppendLazy_WideQuery_100_10_Varied(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		buf = buf[:0]
 		out, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
-			Schema:   schema,
-			AST:      doc,
-			Args:     map[string]interface{}{"v": fmt.Sprintf("v-%d", i)},
-			LazyPath: true,
+			Schema:           schema,
+			AST:              doc,
+			Args:             map[string]interface{}{"v": fmt.Sprintf("v-%d", i)},
+			PreserveInfoPath: true,
 		}, buf)
 		if len(specErrs) > 0 {
 			b.Fatalf("spec errors: %v", specErrs)
@@ -502,7 +503,7 @@ func BenchmarkPlannedAppendLazy_WideQuery_100_10_Varied(b *testing.B) {
 	}
 }
 
-func BenchmarkPlannedAppendLazy_WideQuery_100_10_StaticArg(b *testing.B) {
+func BenchmarkPlannedAppendEager_WideQuery_100_10_StaticArg(b *testing.B) {
 	schema := benchutil.WideArgedSchemaWithXFieldsAndYItems(100, 10)
 	query := benchutil.WideArgedSchemaQueryWithVariable(100)
 
@@ -523,10 +524,10 @@ func BenchmarkPlannedAppendLazy_WideQuery_100_10_StaticArg(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		buf = buf[:0]
 		out, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
-			Schema:   schema,
-			AST:      doc,
-			Args:     args,
-			LazyPath: true,
+			Schema:           schema,
+			AST:              doc,
+			Args:             args,
+			PreserveInfoPath: true,
 		}, buf)
 		if len(specErrs) > 0 {
 			b.Fatalf("spec errors: %v", specErrs)

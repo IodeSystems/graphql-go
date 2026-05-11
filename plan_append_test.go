@@ -44,6 +44,8 @@ func runParity(t *testing.T, schema graphql.Schema, query, opName string, args m
 		t.Fatalf("marshal map result: %v", err)
 	}
 
+	// Fast default: PreserveInfoPath=false, info.Path nil under
+	// append-mode, depth-stack used for error paths.
 	appendBytes, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
 		Schema:        schema,
 		AST:           doc,
@@ -56,34 +58,36 @@ func runParity(t *testing.T, schema graphql.Schema, query, opName string, args m
 		t.Fatalf("append spec errors: %v", specErrs)
 	}
 
-	lazyBytes, lazySpecErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
-		Schema:        schema,
-		AST:           doc,
-		OperationName: opName,
-		Args:          args,
-		Root:          root,
-		Context:       context.Background(),
-		LazyPath:      true,
+	// Opt-out: PreserveInfoPath=true restores per-field *ResponsePath
+	// allocation; resolvers see a populated info.Path.
+	eagerBytes, eagerSpecErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
+		Schema:           schema,
+		AST:              doc,
+		OperationName:    opName,
+		Args:             args,
+		Root:             root,
+		Context:          context.Background(),
+		PreserveInfoPath: true,
 	}, nil)
-	if len(lazySpecErrs) > 0 {
-		t.Fatalf("append (lazyPath) spec errors: %v", lazySpecErrs)
+	if len(eagerSpecErrs) > 0 {
+		t.Fatalf("append (PreserveInfoPath) spec errors: %v", eagerSpecErrs)
 	}
 
-	var mapDecoded, appendDecoded, lazyDecoded interface{}
+	var mapDecoded, appendDecoded, eagerDecoded interface{}
 	if err := json.Unmarshal(mapBytes, &mapDecoded); err != nil {
 		t.Fatalf("decode map: %v\nbytes: %s", err, mapBytes)
 	}
 	if err := json.Unmarshal(appendBytes, &appendDecoded); err != nil {
 		t.Fatalf("decode append: %v\nbytes: %s", err, appendBytes)
 	}
-	if err := json.Unmarshal(lazyBytes, &lazyDecoded); err != nil {
-		t.Fatalf("decode append (lazyPath): %v\nbytes: %s", err, lazyBytes)
+	if err := json.Unmarshal(eagerBytes, &eagerDecoded); err != nil {
+		t.Fatalf("decode append (PreserveInfoPath): %v\nbytes: %s", err, eagerBytes)
 	}
 	if !reflect.DeepEqual(mapDecoded, appendDecoded) {
 		t.Fatalf("parity mismatch:\n  ExecutePlan:       %s\n  ExecutePlanAppend: %s", mapBytes, appendBytes)
 	}
-	if !reflect.DeepEqual(appendDecoded, lazyDecoded) {
-		t.Fatalf("LazyPath parity mismatch:\n  ExecutePlanAppend:           %s\n  ExecutePlanAppend(LazyPath):  %s", appendBytes, lazyBytes)
+	if !reflect.DeepEqual(appendDecoded, eagerDecoded) {
+		t.Fatalf("PreserveInfoPath parity mismatch:\n  default:                            %s\n  ExecutePlanAppend(PreserveInfoPath): %s", appendBytes, eagerBytes)
 	}
 }
 
@@ -409,10 +413,10 @@ func TestAppendByteShape(t *testing.T) {
 	}
 }
 
-// TestAppendLazyPath_InfoPathIsNil confirms the contract advertised
-// by ExecuteParams.LazyPath: every resolver sees info.Path == nil.
-// Default mode (LazyPath=false) must still populate info.Path.
-func TestAppendLazyPath_InfoPathIsNil(t *testing.T) {
+// TestAppendInfoPath_DefaultIsNil confirms append-mode's documented
+// contract: by default info.Path is nil for every resolver call.
+// Opting out via PreserveInfoPath=true restores the populated path.
+func TestAppendInfoPath_DefaultIsNil(t *testing.T) {
 	var sawPath, sawNil bool
 	probe := func(p graphql.ResolveParams) (interface{}, error) {
 		if p.Info.Path == nil {
@@ -439,22 +443,22 @@ func TestAppendLazyPath_InfoPathIsNil(t *testing.T) {
 
 	sawPath, sawNil = false, false
 	_, _ = graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc}, nil)
-	if !sawPath || sawNil {
-		t.Fatalf("default mode: want non-nil info.Path; sawPath=%v sawNil=%v", sawPath, sawNil)
+	if sawPath || !sawNil {
+		t.Fatalf("default mode: want nil info.Path; sawPath=%v sawNil=%v", sawPath, sawNil)
 	}
 
 	sawPath, sawNil = false, false
-	_, _ = graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc, LazyPath: true}, nil)
-	if sawPath || !sawNil {
-		t.Fatalf("lazy mode: want nil info.Path; sawPath=%v sawNil=%v", sawPath, sawNil)
+	_, _ = graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc, PreserveInfoPath: true}, nil)
+	if !sawPath || sawNil {
+		t.Fatalf("PreserveInfoPath: want non-nil info.Path; sawPath=%v sawNil=%v", sawPath, sawNil)
 	}
 }
 
-// TestAppendLazyPath_ErrorLocation confirms that error envelopes
-// under LazyPath carry the same `path` array as the default-mode
-// envelope — the depth-stack snapshot must reconstruct the same
-// locator that AsArray() builds from a linked list.
-func TestAppendLazyPath_ErrorLocation(t *testing.T) {
+// TestAppendInfoPath_ErrorLocation confirms that error envelopes are
+// identical under default (depth-stack) and PreserveInfoPath
+// (per-field *ResponsePath) modes — both reconstruct the same spec
+// `path` array.
+func TestAppendInfoPath_ErrorLocation(t *testing.T) {
 	thing := graphql.NewObject(graphql.ObjectConfig{
 		Name: "Thing",
 		Fields: graphql.Fields{
@@ -489,4 +493,90 @@ func TestAppendLazyPath_ErrorLocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	runParity(t, schema, `{ things { name } }`, "", nil, nil)
+}
+
+// TestAppendConcurrentThunks confirms ExecuteParams.ConcurrentThunks
+// routes through ExecutePlan + json.Marshal so thunked resolvers
+// retain their concurrency contract. Default (ConcurrentThunks=false)
+// dethunks eagerly — correct value, no parallelism.
+func TestAppendConcurrentThunks(t *testing.T) {
+	fooType := graphql.NewObject(graphql.ObjectConfig{
+		Name: "Foo",
+		Fields: graphql.Fields{
+			"name": &graphql.Field{Type: graphql.String},
+		},
+	})
+	barType := graphql.NewObject(graphql.ObjectConfig{
+		Name: "Bar",
+		Fields: graphql.Fields{
+			"name": &graphql.Field{Type: graphql.String},
+		},
+	})
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"foo": &graphql.Field{
+					Type: fooType,
+					Resolve: func(graphql.ResolveParams) (interface{}, error) {
+						return func() (interface{}, error) {
+							return map[string]interface{}{"name": "Foo's name"}, nil
+						}, nil
+					},
+				},
+				"bar": &graphql.Field{
+					Type: barType,
+					Resolve: func(graphql.ResolveParams) (interface{}, error) {
+						ch := make(chan map[string]interface{}, 1)
+						go func() {
+							ch <- map[string]interface{}{"name": "Bar's name"}
+						}()
+						return func() (interface{}, error) { return <-ch, nil }, nil
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := source.NewSource(&source.Source{Body: []byte(`{ foo { name } bar { name } }`), Name: "t"})
+	doc, _ := parser.Parse(parser.ParseParams{Source: src})
+	plan, _ := graphql.PlanQuery(&schema, doc, "")
+
+	got, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
+		Schema:           schema,
+		AST:              doc,
+		ConcurrentThunks: true,
+	}, nil)
+	if len(specErrs) > 0 {
+		t.Fatalf("spec errors: %v", specErrs)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("decode: %v\nbytes: %s", err, got)
+	}
+	data, _ := decoded["data"].(map[string]interface{})
+	foo, _ := data["foo"].(map[string]interface{})
+	bar, _ := data["bar"].(map[string]interface{})
+	if foo["name"] != "Foo's name" {
+		t.Fatalf("foo.name = %v; want %q", foo["name"], "Foo's name")
+	}
+	if bar["name"] != "Bar's name" {
+		t.Fatalf("bar.name = %v; want %q", bar["name"], "Bar's name")
+	}
+
+	// Default (ConcurrentThunks=false) also produces correct values —
+	// just synchronously. Cross-check.
+	got2, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc}, nil)
+	if len(specErrs) > 0 {
+		t.Fatalf("default spec errors: %v", specErrs)
+	}
+	var decoded2 map[string]interface{}
+	if err := json.Unmarshal(got2, &decoded2); err != nil {
+		t.Fatalf("default decode: %v\nbytes: %s", err, got2)
+	}
+	if !reflect.DeepEqual(decoded, decoded2) {
+		t.Fatalf("thunk parity:\n  ConcurrentThunks: %s\n  default:          %s", got, got2)
+	}
 }

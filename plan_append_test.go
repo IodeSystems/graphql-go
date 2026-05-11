@@ -495,6 +495,68 @@ func TestAppendInfoPath_ErrorLocation(t *testing.T) {
 	runParity(t, schema, `{ things { name } }`, "", nil, nil)
 }
 
+// TestAppendArgsPool_NonNilArgs confirms p.Args is non-nil under
+// the pooled default and that RetainArgs=true opt-out also works.
+// The pooled map must be a fresh-or-recycled empty map; the
+// resolver must see exactly the args it was passed.
+func TestAppendArgsPool_NonNilArgs(t *testing.T) {
+	var seen map[string]interface{}
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"v": &graphql.Field{
+					Type: graphql.String,
+					Args: graphql.FieldConfigArgument{
+						"a": &graphql.ArgumentConfig{Type: graphql.String},
+					},
+					Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+						seen = p.Args
+						if p.Args == nil {
+							return nil, errors.New("p.Args is nil")
+						}
+						return p.Args["a"], nil
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := source.NewSource(&source.Source{Body: []byte(`{ v(a: "hi") }`), Name: "t"})
+	doc, _ := parser.Parse(parser.ParseParams{Source: src})
+	plan, _ := graphql.PlanQuery(&schema, doc, "")
+
+	got, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc}, nil)
+	if len(specErrs) > 0 {
+		t.Fatalf("spec errors: %v", specErrs)
+	}
+	if !strings.Contains(string(got), `"v":"hi"`) {
+		t.Fatalf("default mode: want v=hi in %s", got)
+	}
+	// seen was captured before release; the resolver should not
+	// inspect it post-return, but we can confirm the pool returned
+	// a non-nil map.
+	if seen == nil {
+		t.Fatal("resolver received nil args")
+	}
+
+	// Opt-out path: RetainArgs=true skips the pool. Args still
+	// non-nil and resolver still works.
+	seen = nil
+	got2, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc, RetainArgs: true}, nil)
+	if len(specErrs) > 0 {
+		t.Fatalf("retain spec errors: %v", specErrs)
+	}
+	if !strings.Contains(string(got2), `"v":"hi"`) {
+		t.Fatalf("RetainArgs mode: want v=hi in %s", got2)
+	}
+	if seen == nil {
+		t.Fatal("resolver received nil args (RetainArgs)")
+	}
+}
+
 // TestAppendConcurrentThunks confirms ExecuteParams.ConcurrentThunks
 // routes through ExecutePlan + json.Marshal so thunked resolvers
 // retain their concurrency contract. Default (ConcurrentThunks=false)

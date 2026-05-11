@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/graphql-go/graphql/gqlerrors"
 	"github.com/graphql-go/graphql/language/ast"
@@ -44,6 +45,17 @@ type ExecuteParams struct {
 	// schema's thunks kick off goroutines and rely on the dethunk
 	// pass for parallel execution. Has no effect on ExecutePlan.
 	ConcurrentThunks bool
+
+	// RetainArgs disables the args-map pool that the executor uses
+	// to recycle ResolveParams.Args across resolver calls. The
+	// default — false — acquires the args map from a sync.Pool and
+	// returns it after the resolver finishes; resolvers must treat
+	// p.Args as borrowed (read freely, do not retain references
+	// past the call, do not mutate-then-return). Set true if a
+	// resolver stashes p.Args in a struct field, channel, or
+	// goroutine that outlives the resolver call. Applies to both
+	// ExecutePlan and ExecutePlanAppend.
+	RetainArgs bool
 }
 
 // Execute runs an operation against a schema. Behavior is unchanged
@@ -85,6 +97,46 @@ type executionContext struct {
 	// allocation. Always false for the map-tree executor.
 	lazyPath bool
 	pathBuf  []interface{}
+
+	// retainArgs mirrors !ExecuteParams.RetainArgs. When true (the
+	// default), the executor recycles per-resolver args maps through
+	// argsMapPool. When false, every resolver call allocates a fresh
+	// args map — required when resolvers retain p.Args references
+	// past the resolve call (struct fields, channels, goroutines).
+	poolArgs bool
+}
+
+// argsMapPool recycles per-resolver argument maps. Acquired before
+// each resolver call (via acquireArgsMap), released after (via
+// releaseArgsMap). The pool persists across requests; resolvers must
+// treat p.Args as borrowed (read freely, do not retain references
+// past the resolver return). Adopters that retain set
+// ExecuteParams.RetainArgs to opt out.
+var argsMapPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[string]interface{}, 4)
+	},
+}
+
+// acquireArgsMap returns a cleared args map suitable for one
+// resolver call. Always returns a non-nil map; ResolveParams.Args is
+// non-nil by historical contract.
+func acquireArgsMap() map[string]interface{} {
+	return argsMapPool.Get().(map[string]interface{})
+}
+
+// releaseArgsMap returns a no-longer-needed args map to the pool,
+// clearing its keys first. Safe on a nil map (no-op). Must not be
+// called when ExecuteParams.RetainArgs is set: the caller may have
+// stashed the map past the resolver return.
+func releaseArgsMap(m map[string]interface{}) {
+	if m == nil {
+		return
+	}
+	for k := range m {
+		delete(m, k)
+	}
+	argsMapPool.Put(m)
 }
 
 // popPath truncates pathBuf back to the depth captured at the

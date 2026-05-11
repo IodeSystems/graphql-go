@@ -41,30 +41,39 @@ func getVariableValues(
 func getArgumentValues(
 	argDefs []*Argument, argASTs []*ast.Argument,
 	variableValues map[string]interface{}) map[string]interface{} {
-
-	argASTMap := map[string]*ast.Argument{}
-	for _, argAST := range argASTs {
-		if argAST.Name != nil {
-			argASTMap[argAST.Name.Value] = argAST
-		}
-	}
 	results := map[string]interface{}{}
+	populateArgumentValues(results, argDefs, argASTs, variableValues)
+	return results
+}
+
+// populateArgumentValues writes the resolved argument values into dst.
+// dst is left empty when argDefs is empty or every arg's value is
+// nullish. Used by the executor to write directly into a pooled args
+// map (avoiding the per-field map alloc that getArgumentValues would
+// otherwise return). The argASTs lookup is open-coded as a linear
+// scan; typical fields have 0-3 args so the O(N×M) is comfortably
+// under any hashed-lookup overhead.
+func populateArgumentValues(
+	dst map[string]interface{},
+	argDefs []*Argument, argASTs []*ast.Argument,
+	variableValues map[string]interface{},
+) {
 	for _, argDef := range argDefs {
-		var (
-			tmp   interface{}
-			value ast.Value
-		)
-		if tmpValue, ok := argASTMap[argDef.PrivateName]; ok {
-			value = tmpValue.Value
+		var value ast.Value
+		for _, argAST := range argASTs {
+			if argAST.Name != nil && argAST.Name.Value == argDef.PrivateName {
+				value = argAST.Value
+				break
+			}
 		}
-		if tmp = valueFromAST(value, argDef.Type, variableValues); isNullish(tmp) {
+		tmp := valueFromAST(value, argDef.Type, variableValues)
+		if isNullish(tmp) {
 			tmp = argDef.DefaultValue
 		}
 		if !isNullish(tmp) {
-			results[argDef.PrivateName] = tmp
+			dst[argDef.PrivateName] = tmp
 		}
 	}
-	return results
 }
 
 // Given a variable definition, and any value of input, return a value which

@@ -672,6 +672,7 @@ func ExecutePlan(plan *Plan, p ExecuteParams) (result *Result) {
 			Operation:      plan.operation,
 			VariableValues: variableValues,
 			Context:        ctx,
+			poolArgs:       !p.RetainArgs,
 		}
 
 		data := executePlannedSelection(eCtx, plan.root, p.Root, plan.rootType, nil)
@@ -756,6 +757,12 @@ func resolvePlannedField(eCtx *executionContext, parentType *Object, source inte
 	// Resolvers expect a non-nil Args map (the existing resolveField
 	// path always passes the result of getArgumentValues, which is
 	// never nil even when empty). Match that contract.
+	//
+	// The ExecutePlan path does NOT pool args — resolvers may return
+	// thunks that close over p.Args, and those thunks are dethunked
+	// later (breadth-first), long after this function returns. The
+	// append-mode walker dethunks synchronously and can safely pool;
+	// see writePlannedField.
 	var args map[string]interface{}
 	switch {
 	case fp.args.hasVariables:
@@ -1019,6 +1026,7 @@ func ExecutePlanAppend(plan *Plan, p ExecuteParams, dst []byte) ([]byte, []gqler
 		VariableValues: variableValues,
 		Context:        ctx,
 		lazyPath:       !p.PreserveInfoPath,
+		poolArgs:       !p.RetainArgs,
 	}
 
 	dst = append(dst, `{"data":`...)
@@ -1173,17 +1181,40 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 		resolveFn = DefaultResolveFn
 	}
 
+	// Default mode (poolArgs=true): borrow the args map from
+	// argsMapPool and release on the way out. Append-mode dethunks
+	// synchronously inside writeCompleteValue, so any thunk that
+	// closes over p.Args has finished using it before the deferred
+	// release fires. Resolvers that retain p.Args past the call
+	// (struct fields, channels, goroutines outliving the resolver)
+	// must opt out via ExecuteParams.RetainArgs.
 	var args map[string]interface{}
 	switch {
 	case fp.args.hasVariables:
-		args = getArgumentValues(fp.args.fieldDefArgs, fp.args.argASTs, eCtx.VariableValues)
+		if eCtx.poolArgs {
+			args = acquireArgsMap()
+			populateArgumentValues(args, fp.args.fieldDefArgs, fp.args.argASTs, eCtx.VariableValues)
+		} else {
+			args = getArgumentValues(fp.args.fieldDefArgs, fp.args.argASTs, eCtx.VariableValues)
+		}
 	case fp.args.static != nil:
-		args = make(map[string]interface{}, len(fp.args.static))
+		if eCtx.poolArgs {
+			args = acquireArgsMap()
+		} else {
+			args = make(map[string]interface{}, len(fp.args.static))
+		}
 		for k, v := range fp.args.static {
 			args[k] = v
 		}
 	default:
-		args = map[string]interface{}{}
+		if eCtx.poolArgs {
+			args = acquireArgsMap()
+		} else {
+			args = map[string]interface{}{}
+		}
+	}
+	if eCtx.poolArgs {
+		defer releaseArgsMap(args)
 	}
 
 	var resolveFieldFinishFn resolveFieldFinishFuncHandler

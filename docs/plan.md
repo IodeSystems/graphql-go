@@ -427,47 +427,91 @@ the append-mode wedge in exchange for thunk concurrency:
   the two categories into `Result.Errors` and we don't try to
   re-split them.
 
+### Phase 6 — Pooled args map (default-on; `RetainArgs` opt-out)
+
+**Done.**
+- [x] **Package-level `argsMapPool` (`sync.Pool`)** recycles
+  `map[string]interface{}` across resolver calls. `acquireArgsMap` /
+  `releaseArgsMap` helpers; cleared on release.
+- [x] **`writePlannedField` (append walker) acquires from the pool
+  by default.** The `defer releaseArgsMap(args)` runs at the end of
+  the field walk, after `writeCompleteValue` has dethunked and
+  emitted bytes — so any thunk closing over `p.Args` has already
+  finished. The ExecutePlan path (`resolvePlannedField`) does **not**
+  pool: its thunks dethunk later (breadth-first), long after the
+  resolver returned, and might still read `p.Args`.
+- [x] **`getArgumentValues` refactored**: the inner `argASTMap`
+  alloc is gone (linear lookup over typical 0-3 args); body extracted
+  into `populateArgumentValues(dst, ...)` which writes directly into
+  a pooled map. Saves one alloc per variable-arg field on top of the
+  result-map alloc.
+- [x] **`ExecuteParams.RetainArgs bool`** disables the pool — set
+  true for resolvers that retain `p.Args` past the call (struct
+  field, channel, goroutine that outlives the resolver).
+
+**Headline numbers** (vs the prior Phase-5 default; this work
+compounds with everything before it):
+
+| Bench | ns/op Δ | B/op Δ | allocs/op Δ |
+|---|---|---|---|
+| WideQuery_100_10 | ~flat | −67 % | −37 % |
+| WideQuery_100_10_Varied | −46 % | −94 % | −57 % |
+| WideQuery_100_10_StaticArg | −47 % | −94 % | −57 % |
+| ListQuery_1K | −16 % | −59 % | −37 % |
+
+`Varied` and `StaticArg` win the most because every field both copies
+static args **and** ran `getArgumentValues` (or its variable-arg
+equivalent) — two map allocs per field, both reclaimed.
+
+**Cumulative vs `ExecutePlan` map-tree baseline (Phases 1–6):**
+
+| Bench | ns/op Δ | B/op Δ | allocs/op Δ |
+|---|---|---|---|
+| WideQuery_100_10 | −67 % | −97 % | −75 % |
+| WideQuery_100_10_Varied | −70 % | −98 % | −81 % |
+| WideQuery_100_10_StaticArg | −71 % | −98 % | −81 % |
+| ListQuery_1K | −70 % | −96 % | −80 % |
+
+**Contract caveat.** Default behavior treats `p.Args` as borrowed:
+read it during the resolver, but do not retain references to the
+map past the resolver return. Patterns that store `p.Args` in a
+struct field, send it on a channel, or close over it inside a
+spawned goroutine break under pooling — flip `RetainArgs=true` and
+file an issue.
+
 ### Investigation backlog
 
-Ranked by win-to-risk ratio. Pull from the top when there's appetite
-for another round; each entry stands alone and can ship without the
-others. Numbers below are post-Phase-4 alloc-profile shares on
-`BenchmarkPlannedAppendLazy_WideQuery_100_10`.
+Ranked by win-to-risk ratio. Numbers below are post-Phase-6 shares.
 
-1. **Args map pool (with contract change).** `make(map[string]interface{},
-   ...)` and `map[string]interface{}{}` are still 1 alloc per field
-   (~1000 allocs on the wide bench). A `sync.Pool` of args maps with a
-   clean-and-return discipline reclaims that, *if* resolvers agree not
-   to retain `p.Args` past the resolve call.
-
-   **Risk:** breaks any resolver that stashes `p.Args` in a struct
-   field. Mitigate by gating behind a per-schema flag (`PoolArgs
-   bool`) or a `ResolveAppend`-only path (Phase 6).
-
-2. **Plan-time partial-literal arg pre-coercion.** Today
+1. **Plan-time partial-literal arg pre-coercion.** Today
    `planArguments` is all-or-nothing: any `$variable` reference
-   forces full `getArgumentValues` at execute time. Pre-coercing the
-   literal subset cuts per-request coercion work on mixed arg lists.
+   forces full coercion at execute time. Pre-coercing the literal
+   subset cuts per-request coercion work on mixed arg lists.
    Mostly helps multi-arg fields with one variable.
 
    **Risk:** low. Mechanical refactor of `planArguments`.
 
-3. **Direct `DateTime` format into dst.** The current emitter calls
+2. **Direct `DateTime` format into dst.** The current emitter calls
    `t.MarshalText` then `appendJSONString(string(buf))`, paying one
    allocation per `DateTime` field. A direct format-into-`dst` version
    trims it. Doesn't dominate any bench but cheap and adopter-friendly.
 
-4. **Direct error-array emit on the envelope tail.** `json.Marshal(eCtx.Errors)`
+3. **Direct error-array emit on the envelope tail.** `json.Marshal(eCtx.Errors)`
    in `ExecutePlanAppend` is only hit when errors exist, so not on the
    hot path — but for error-heavy callers a direct
    `appendFormattedErrors` would skip another reflective walk.
 
-5. **`sync.Pool` for `eCtx.pathBuf` under LazyPath.** One slice alloc
-   per request amortizes to near-zero with pooling; depth-bounded
-   capacity makes the pool's discipline trivial. Marginal win — the
-   single-slice alloc is small — but cheap.
+4. **`sync.Pool` for `eCtx.pathBuf`.** One slice alloc per request
+   amortizes to near-zero with pooling; depth-bounded capacity makes
+   the pool's discipline trivial. Marginal win — the single-slice
+   alloc is small — but cheap.
 
-### Phase 6 — Resolver-side append API (~3-5 days)
+5. **Pool `ResolveInfo`-driving `ResolveParams` struct, or hoist into
+   eCtx.** Each resolver call still stack-builds a `ResolveParams`
+   struct that's pretty large. With escape analysis it stays on the
+   stack today; if it ever escapes, pooling is the next move.
+
+### Phase 7 — Resolver-side append API (~3-5 days)
 
 Opt-in. Lets downstream resolvers write JSON directly to the buffer
 instead of returning `interface{}`. Removes the last boxing step and
@@ -485,7 +529,7 @@ serialize themselves.
   scope.
 
 **Expected:** ~30-50 additional allocs reclaimed when the adopter
-goes all-in. Compound with Phases 1–4 to reach the projected 3-4×
+goes all-in. Compound with Phases 1–6 to reach the projected 3-4×
 end-to-end wedge cited in the gateway's perf docs.
 
 ---
@@ -520,7 +564,7 @@ end-to-end wedge cited in the gateway's perf docs.
    `bytes.Buffer` and `Write` at the end; adopters wanting
    `http.ResponseWriter` write to a pooled buffer then one
    `w.Write(buf)`.
-5. **`ResolveAppend` API stability** (Phase 6). Once exposed, hard
+5. **`ResolveAppend` API stability** (Phase 7). Once exposed, hard
    to remove. Mitigation: keep it experimental — package doc warns
    that the signature may change pre-1.0 of this fork; existing
    `Resolve` remains the documented stable surface.
@@ -567,8 +611,12 @@ end-to-end wedge cited in the gateway's perf docs.
 | `executor.go` | 5 | Add `ExecuteParams.ConcurrentThunks` (opt-out). | landed |
 | `plan.go` | 5 | `executePlanAppendViaResult` delegate that runs `ExecutePlan` + `json.Marshal` when the caller opts back into the breadth-first dethunk pass. | landed |
 | `plan_append_test.go` | 5 | `TestAppendConcurrentThunks` exercises the thunk path and cross-checks default-mode (eager) parity. | landed |
-| `definition.go` | 6 | Add `ResolveAppend` to `FieldDefinition` (`Field`). | pending |
-| `plan.go` | 6 | Walker branches on `ResolveAppend` presence. | pending |
+| `executor.go` | 6 | Add `ExecuteParams.RetainArgs` (opt-out) + `executionContext.poolArgs`; package-level `argsMapPool` + `acquireArgsMap` / `releaseArgsMap` helpers. | landed |
+| `values.go` | 6 | Extract `populateArgumentValues(dst, ...)` from `getArgumentValues`; drop the per-call `argASTMap` for a linear lookup. | landed |
+| `plan.go` | 6 | `writePlannedField` acquires from `argsMapPool` and `defer`-releases (append walker only — ExecutePlan's thunks defeat pooling). | landed |
+| `plan_append_test.go` | 6 | `TestAppendArgsPool_NonNilArgs` confirms `p.Args` is non-nil under both default-pool and `RetainArgs` modes. | landed |
+| `definition.go` | 7 | Add `ResolveAppend` to `FieldDefinition` (`Field`). | pending |
+| `plan.go` | 7 | Walker branches on `ResolveAppend` presence. | pending |
 
 ### Append-mode invariants (for reviewers)
 

@@ -165,6 +165,7 @@ var Int = NewScalar(ScalarConfig{
 		}
 		return nil
 	},
+	AppendJSON: appendIntJSON,
 })
 
 func coerceFloat(value interface{}) interface{} {
@@ -302,6 +303,7 @@ var Float = NewScalar(ScalarConfig{
 		}
 		return nil
 	},
+	AppendJSON: appendFloatJSON,
 })
 
 func coerceString(value interface{}) interface{} {
@@ -329,6 +331,7 @@ var String = NewScalar(ScalarConfig{
 		}
 		return nil
 	},
+	AppendJSON: appendStringJSON,
 })
 
 func coerceBool(value interface{}) interface{} {
@@ -488,6 +491,7 @@ var Boolean = NewScalar(ScalarConfig{
 		}
 		return nil
 	},
+	AppendJSON: appendBoolJSON,
 })
 
 // ID is the GraphQL id type definition
@@ -509,6 +513,7 @@ var ID = NewScalar(ScalarConfig{
 		}
 		return nil
 	},
+	AppendJSON: appendStringJSON,
 })
 
 func serializeDateTime(value interface{}) interface{} {
@@ -567,4 +572,210 @@ var DateTime = NewScalar(ScalarConfig{
 		}
 		return nil
 	},
+	AppendJSON: appendDateTimeJSON,
 })
+
+// appendIntJSON writes a coerceInt-style result as a JSON integer.
+// Matches the contract that Serialize returns int (or nil); other
+// kinds round-trip through coerceInt to preserve the slow-path
+// behavior (e.g. float64 → truncated int).
+func appendIntJSON(dst []byte, value interface{}) []byte {
+	if n, ok := value.(int); ok {
+		return strconv.AppendInt(dst, int64(n), 10)
+	}
+	coerced := coerceInt(value)
+	if coerced == nil {
+		return append(dst, "null"...)
+	}
+	return strconv.AppendInt(dst, int64(coerced.(int)), 10)
+}
+
+// appendFloatJSON writes a Float-typed value as a JSON number.
+// Mirrors encoding/json's float behavior: NaN / +-Inf are not
+// representable in JSON and yield null. Format follows json's
+// strategy (use 'e' for very small/large magnitudes, 'f' otherwise)
+// to keep byte-level parity with json.Marshal for the common cases.
+func appendFloatJSON(dst []byte, value interface{}) []byte {
+	var f float64
+	switch v := value.(type) {
+	case float64:
+		f = v
+	case float32:
+		f = float64(v)
+	default:
+		coerced := coerceFloat(value)
+		if coerced == nil {
+			return append(dst, "null"...)
+		}
+		f = coerced.(float64)
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return append(dst, "null"...)
+	}
+	abs := math.Abs(f)
+	fmtByte := byte('f')
+	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		fmtByte = 'e'
+	}
+	dst = strconv.AppendFloat(dst, f, fmtByte, -1, 64)
+	if fmtByte == 'e' {
+		// strconv may emit "1e+09"; encoding/json emits "1e+09" too,
+		// so no normalization needed here.
+		return dst
+	}
+	return dst
+}
+
+// appendBoolJSON writes a Boolean-typed value as JSON true/false.
+func appendBoolJSON(dst []byte, value interface{}) []byte {
+	switch v := value.(type) {
+	case bool:
+		if v {
+			return append(dst, "true"...)
+		}
+		return append(dst, "false"...)
+	case *bool:
+		if v == nil {
+			return append(dst, "null"...)
+		}
+		if *v {
+			return append(dst, "true"...)
+		}
+		return append(dst, "false"...)
+	}
+	coerced := coerceBool(value)
+	b, ok := coerced.(bool)
+	if !ok {
+		return append(dst, "null"...)
+	}
+	if b {
+		return append(dst, "true"...)
+	}
+	return append(dst, "false"...)
+}
+
+// appendStringJSON writes a String / ID value as a JSON string.
+// Falls back to coerceString for non-string types (matching the
+// Serialize-then-emit pipeline).
+func appendStringJSON(dst []byte, value interface{}) []byte {
+	switch v := value.(type) {
+	case string:
+		return appendJSONString(dst, v)
+	case *string:
+		if v == nil {
+			return append(dst, "null"...)
+		}
+		return appendJSONString(dst, *v)
+	}
+	coerced := coerceString(value)
+	if coerced == nil {
+		return append(dst, "null"...)
+	}
+	if s, ok := coerced.(string); ok {
+		return appendJSONString(dst, s)
+	}
+	return append(dst, "null"...)
+}
+
+// appendDateTimeJSON renders a time.Time / *time.Time as the JSON
+// quoted RFC 3339 form serializeDateTime would produce.
+func appendDateTimeJSON(dst []byte, value interface{}) []byte {
+	var t time.Time
+	switch v := value.(type) {
+	case time.Time:
+		t = v
+	case *time.Time:
+		if v == nil {
+			return append(dst, "null"...)
+		}
+		t = *v
+	default:
+		return append(dst, "null"...)
+	}
+	buf, err := t.MarshalText()
+	if err != nil {
+		return append(dst, "null"...)
+	}
+	return appendJSONString(dst, string(buf))
+}
+
+const hexChars = "0123456789abcdef"
+
+// appendJSONString writes a JSON-quoted string to dst with HTML-safe
+// escaping (matches encoding/json's default for <, >, &). UTF-8 is
+// passed through; control bytes (< 0x20) get \u escapes; U+2028 and
+// U+2029 get   /   to stay valid as JS embeds. The fast
+// path streams contiguous safe runs in a single append.
+func appendJSONString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < 0x80 {
+			if jsonSafeSet[c] {
+				i++
+				continue
+			}
+			if start < i {
+				dst = append(dst, s[start:i]...)
+			}
+			switch c {
+			case '"', '\\':
+				dst = append(dst, '\\', c)
+			case '\n':
+				dst = append(dst, '\\', 'n')
+			case '\r':
+				dst = append(dst, '\\', 'r')
+			case '\t':
+				dst = append(dst, '\\', 't')
+			case '\b':
+				dst = append(dst, '\\', 'b')
+			case '\f':
+				dst = append(dst, '\\', 'f')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', hexChars[c>>4], hexChars[c&0xF])
+			}
+			i++
+			start = i
+			continue
+		}
+		// Multibyte UTF-8: detect U+2028 / U+2029 (E2 80 A8 / A9).
+		if c == 0xE2 && i+2 < len(s) && s[i+1] == 0x80 && (s[i+2] == 0xA8 || s[i+2] == 0xA9) {
+			if start < i {
+				dst = append(dst, s[start:i]...)
+			}
+			dst = append(dst, '\\', 'u', '2', '0', '2', hexChars[s[i+2]&0xF])
+			i += 3
+			start = i
+			continue
+		}
+		i++
+	}
+	if start < len(s) {
+		dst = append(dst, s[start:]...)
+	}
+	return append(dst, '"')
+}
+
+// jsonSafeSet[c] is true when byte c may appear unescaped inside a
+// JSON string under HTML-safe encoding (matches encoding/json's
+// htmlSafeSet).
+var jsonSafeSet = [128]bool{
+	' ': true, '!': true, /* '"' escaped */ '#': true, '$': true, '%': true,
+	/* '&' escaped */ '\'': true, '(': true, ')': true, '*': true, '+': true,
+	',': true, '-': true, '.': true, '/': true,
+	'0': true, '1': true, '2': true, '3': true, '4': true,
+	'5': true, '6': true, '7': true, '8': true, '9': true,
+	':': true, ';': true, /* '<' escaped */ '=': true, /* '>' escaped */
+	'?': true, '@': true,
+	'A': true, 'B': true, 'C': true, 'D': true, 'E': true, 'F': true, 'G': true,
+	'H': true, 'I': true, 'J': true, 'K': true, 'L': true, 'M': true, 'N': true,
+	'O': true, 'P': true, 'Q': true, 'R': true, 'S': true, 'T': true, 'U': true,
+	'V': true, 'W': true, 'X': true, 'Y': true, 'Z': true,
+	'[': true, /* '\\' escaped */ ']': true, '^': true, '_': true, '`': true,
+	'a': true, 'b': true, 'c': true, 'd': true, 'e': true, 'f': true, 'g': true,
+	'h': true, 'i': true, 'j': true, 'k': true, 'l': true, 'm': true, 'n': true,
+	'o': true, 'p': true, 'q': true, 'r': true, 's': true, 't': true, 'u': true,
+	'v': true, 'w': true, 'x': true, 'y': true, 'z': true,
+	'{': true, '|': true, '}': true, '~': true,
+}

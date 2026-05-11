@@ -216,6 +216,16 @@ type ParseValueFn func(value interface{}) interface{}
 // ParseLiteralFn is a function type for parsing the literal value of a GraphQLScalar type
 type ParseLiteralFn func(valueAST ast.Value) interface{}
 
+// AppendJSONFn writes the JSON form of an already-serialized scalar
+// value to dst and returns the extended slice. The planned-append
+// executor calls Serialize first (and short-circuits on nil) before
+// invoking the emitter, so implementations receive the
+// post-Serialize value and need only encode it as JSON. Built-in
+// scalars (String, Int, Float, Boolean, ID) ship with defaults;
+// custom scalars opt in. Implementations should append "null" for
+// any input they cannot encode.
+type AppendJSONFn func(dst []byte, value interface{}) []byte
+
 // ScalarConfig options for creating a new GraphQLScalar
 type ScalarConfig struct {
 	Name         string `json:"name"`
@@ -223,6 +233,10 @@ type ScalarConfig struct {
 	Serialize    SerializeFn
 	ParseValue   ParseValueFn
 	ParseLiteral ParseLiteralFn
+	// AppendJSON, when non-nil, gives the planned-append executor a
+	// direct byte-emitter for this scalar. Optional; absence yields
+	// the Serialize → json.Marshal fallback path.
+	AppendJSON AppendJSONFn
 }
 
 // NewScalar creates a new GraphQLScalar
@@ -284,6 +298,13 @@ func (st *Scalar) ParseLiteral(valueAST ast.Value) interface{} {
 		return nil
 	}
 	return st.scalarConfig.ParseLiteral(valueAST)
+}
+
+// AppendJSONFn returns the scalar's AppendJSON emitter, or nil if
+// none is registered. The planner captures it at PlanQuery time; the
+// planned-append executor uses it to bypass Serialize + json.Marshal.
+func (st *Scalar) AppendJSONFn() AppendJSONFn {
+	return st.scalarConfig.AppendJSON
 }
 func (st *Scalar) Name() string {
 	return st.PrivateName

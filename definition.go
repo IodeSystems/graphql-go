@@ -554,6 +554,7 @@ func defineFieldMap(ttype Named, fieldMap Fields) (FieldDefinitionMap, error) {
 			Description:       field.Description,
 			Type:              field.Type,
 			Resolve:           field.Resolve,
+			ResolveAppend:     field.ResolveAppend,
 			Subscribe:         field.Subscribe,
 			DeprecationReason: field.DeprecationReason,
 		}
@@ -607,6 +608,33 @@ type ResolveParams struct {
 
 type FieldResolveFn func(p ResolveParams) (interface{}, error)
 
+// FieldResolveAppendFn is the resolver-side append API: a field's
+// resolver writes its JSON form directly to dst and returns the
+// extended slice. ExecutePlanAppend calls it instead of the
+// (interface{}, error)-returning Resolve, skipping the leaf-emitter
+// boxing + Serialize round-trip and (for composite return types) the
+// recursive selection walk.
+//
+// Contract:
+//   - The implementation MUST emit a complete JSON value matching
+//     the field's declared return type (a string literal for String,
+//     an object literal for Object returns including ALL selected
+//     sub-fields, etc.). The executor does not inspect or rewrite the
+//     emitted bytes — what's appended ends up verbatim in the
+//     response body.
+//   - Returning an error rolls the field bytes back to entry length
+//     and triggers the normal null-bubble-up; the error is recorded
+//     in the response envelope.
+//   - dst may grow; always use the returned slice.
+//   - Selection-set awareness is the implementer's job. p.Info.FieldASTs
+//     carries the AST; resolvers that need sub-selection routing must
+//     inspect it themselves.
+//
+// Has no effect under ExecutePlan (the map-tree executor) — that path
+// always calls Resolve. Experimental: signature may change before a
+// 1.0 of this fork.
+type FieldResolveAppendFn func(p ResolveParams, dst []byte) ([]byte, error)
+
 type ResolveInfo struct {
 	FieldName      string
 	FieldASTs      []*ast.Field
@@ -623,13 +651,14 @@ type ResolveInfo struct {
 type Fields map[string]*Field
 
 type Field struct {
-	Name              string              `json:"name"` // used by graphlql-relay
-	Type              Output              `json:"type"`
-	Args              FieldConfigArgument `json:"args"`
-	Resolve           FieldResolveFn      `json:"-"`
-	Subscribe         FieldResolveFn      `json:"-"`
-	DeprecationReason string              `json:"deprecationReason"`
-	Description       string              `json:"description"`
+	Name              string               `json:"name"` // used by graphlql-relay
+	Type              Output               `json:"type"`
+	Args              FieldConfigArgument  `json:"args"`
+	Resolve           FieldResolveFn       `json:"-"`
+	ResolveAppend     FieldResolveAppendFn `json:"-"`
+	Subscribe         FieldResolveFn       `json:"-"`
+	DeprecationReason string               `json:"deprecationReason"`
+	Description       string               `json:"description"`
 }
 
 type FieldConfigArgument map[string]*ArgumentConfig
@@ -642,13 +671,14 @@ type ArgumentConfig struct {
 
 type FieldDefinitionMap map[string]*FieldDefinition
 type FieldDefinition struct {
-	Name              string         `json:"name"`
-	Description       string         `json:"description"`
-	Type              Output         `json:"type"`
-	Args              []*Argument    `json:"args"`
-	Resolve           FieldResolveFn `json:"-"`
-	Subscribe         FieldResolveFn `json:"-"`
-	DeprecationReason string         `json:"deprecationReason"`
+	Name              string               `json:"name"`
+	Description       string               `json:"description"`
+	Type              Output               `json:"type"`
+	Args              []*Argument          `json:"args"`
+	Resolve           FieldResolveFn       `json:"-"`
+	ResolveAppend     FieldResolveAppendFn `json:"-"`
+	Subscribe         FieldResolveFn       `json:"-"`
+	DeprecationReason string               `json:"deprecationReason"`
 }
 
 type FieldArgument struct {

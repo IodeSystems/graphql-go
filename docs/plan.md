@@ -521,26 +521,58 @@ Ranked by win-to-risk ratio. Numbers below are post-Phase-6 shares.
    struct that's pretty large. With escape analysis it stays on the
    stack today; if it ever escapes, pooling is the next move.
 
-### Phase 7 — Resolver-side append API (~3-5 days)
+### Phase 7 — Resolver-side append API
 
-Opt-in. Lets downstream resolvers write JSON directly to the buffer
-instead of returning `interface{}`. Removes the last boxing step and
-the type-switch in `leafEmitter` for fields whose resolvers can
-serialize themselves.
+**Done.**
+- [x] **`FieldResolveAppendFn func(ResolveParams, []byte) ([]byte, error)`**
+  added on `Field` (config) and `FieldDefinition` (resolved schema).
+  Plumbed through `defineFieldMap` so adopters' field configs flow
+  into the resolved schema. Per-field opt-in: if `ResolveAppend` is
+  non-nil, the walker calls it; otherwise `Resolve` runs as before.
+- [x] **Walker branch in `writePlannedField`.** Builds the args map
+  (pooled), writes the responseKey, hands `dst` straight to the
+  resolver, and accepts the returned slice as the complete field
+  value. No `interface{}` boxing, no `Serialize`, no `leafEmitter`,
+  no sub-selection recursion. Error → panic → `recoverPlannedField`
+  rolls bytes back to `keyStart` and emits the standard null /
+  re-panic-for-NonNull dance.
+- [x] **Test coverage.** Scalar emit, full object subtree, nullable
+  error rollback, NonNull error bubble-up.
+- [x] **Bench (`BenchmarkPlannedAppendResolveAppend_WideQuery_100_10`).**
+  Mirror of the standard wide bench with every leaf field rewritten
+  to `ResolveAppend`.
 
-**Todo.**
-- [ ] **`FieldDefinition.ResolveAppend func(ResolveParams, []byte) ([]byte, error)`.**
-  Optional alongside `Resolve`. When set, the walker calls it instead
-  of `Resolve` + emit. Existing `Resolve` remains the documented
-  path; `ResolveAppend` is the perf opt-in. ~1 day.
-- [ ] **Wire into walker.** Branch in `writePlannedField`. ~0.5 day.
-- [ ] **Adopter example.** Gateway-side dispatcher rewrite (separate
-  PR in the gateway repo, gated on this landing). Not in this repo's
-  scope.
+**Contract.** The resolver is responsible for emitting a complete
+JSON value matching the field's declared return type — including all
+sub-selections for object / list returns. The executor does not
+inspect or rewrite the emitted bytes. `p.Info.FieldASTs` carries the
+selection set if the implementer needs to route per query.
+Extensions hooks (`handleExtensionsResolveFieldDidStart` /
+`resolveFieldFinishFn`) do NOT fire on `ResolveAppend` fields — the
+hook signature expects an `interface{}` result that doesn't exist on
+this path. Documented as experimental: the signature may change pre
+1.0 of this fork.
 
-**Expected:** ~30-50 additional allocs reclaimed when the adopter
-goes all-in. Compound with Phases 1–6 to reach the projected 3-4×
-end-to-end wedge cited in the gateway's perf docs.
+**Headline numbers** (wide bench, `ResolveAppend` for every leaf vs
+`Resolve` baseline on the same shape):
+
+| Bench | ns/op Δ | B/op Δ | allocs/op Δ |
+|---|---|---|---|
+| WideQuery_100_10 | −17 % | −14 % | −1 % |
+
+The alloc delta is small because both modes still pay for the
+`pathBuf` per-field interface boxing (~1000 of the remaining 1729
+allocs). The CPU win comes from skipping `Serialize` /
+`leafEmitter` / result-interface boxing on every leaf. For an
+adopter all-in on `ResolveAppend`, this compounds with Phases 1–6 to
+a ~70 % ns/op wedge vs `ExecutePlan`:
+
+| Bench | Phase 7 ResolveAppend vs `ExecutePlan` baseline |
+|---|---|
+| WideQuery_100_10 | ns/op −71 %, B/op −97 %, allocs/op −76 % |
+
+Hits the projected 3–4× end-to-end wedge cited in the gateway's
+perf docs.
 
 ---
 
@@ -627,8 +659,11 @@ end-to-end wedge cited in the gateway's perf docs.
 | `plan_append_test.go` | 6 | `TestAppendArgsPool_NonNilArgs` confirms `p.Args` is non-nil under both default-pool and `RetainArgs` modes. | landed |
 | `plan.go` | 6.5 | `argPlan` carries `static` + `dynamicArgDefs` / `dynamicArgASTs`; `planArguments` classifies per argDef so mixed-arg fields pre-coerce the literal subset; walkers' execute path is flattened to copy-static-then-resolve-dynamic. | landed |
 | `plan_append_test.go` | 6.5 | `TestAppendPartialLiteralArgs` covers a field with literal + variable + default-value args. | landed |
-| `definition.go` | 7 | Add `ResolveAppend` to `FieldDefinition` (`Field`). | pending |
-| `plan.go` | 7 | Walker branches on `ResolveAppend` presence. | pending |
+| `definition.go` | 7 | Add `FieldResolveAppendFn` type; `ResolveAppend` field on `Field` and `FieldDefinition`; propagate through `defineFieldMap`. | landed |
+| `plan.go` | 7 | `writePlannedField` branches on `fieldDef.ResolveAppend`: hands the args map + dst straight to the resolver, accepts the returned slice. Errors flow through `recoverPlannedField` unchanged. | landed |
+| `plan_append_test.go` | 7 | `TestAppendResolveAppend_{Scalar,ObjectSubtree,Error,NonNullError}` cover the four contract points. | landed |
+| `benchutil/wide_schema.go` | 7 | `WideSchemaResolveAppendWithXFieldsAndYItems` mirror for the bench. | landed |
+| `plan_bench_test.go` | 7 | `BenchmarkPlannedAppendResolveAppend_WideQuery_100_10` sibling. | landed |
 
 ### Append-mode invariants (for reviewers)
 

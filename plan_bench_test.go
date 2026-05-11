@@ -503,6 +503,40 @@ func BenchmarkPlannedAppendEager_WideQuery_100_10_Varied(b *testing.B) {
 	}
 }
 
+// BenchmarkPlannedAppendResolveAppend_WideQuery_100_10 mirrors
+// BenchmarkPlannedAppend_WideQuery_100_10 but every leaf field uses
+// ResolveAppend instead of Resolve. Measures the win from skipping
+// the Serialize / leafEmitter / boxing chain on every field.
+func BenchmarkPlannedAppendResolveAppend_WideQuery_100_10(b *testing.B) {
+	schema := benchutil.WideSchemaResolveAppendWithXFieldsAndYItems(100, 10)
+	query := benchutil.WideSchemaQuery(100)
+
+	src := source.NewSource(&source.Source{Body: []byte(query), Name: "bench"})
+	doc, err := parser.Parse(parser.ParseParams{Source: src})
+	if err != nil {
+		b.Fatalf("parse: %v", err)
+	}
+	plan, err := graphql.PlanQuery(&schema, doc, "")
+	if err != nil {
+		b.Fatalf("plan: %v", err)
+	}
+
+	buf := make([]byte, 0, 64*1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf = buf[:0]
+		out, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
+			Schema: schema,
+			AST:    doc,
+		}, buf)
+		if len(specErrs) > 0 {
+			b.Fatalf("spec errors: %v", specErrs)
+		}
+		buf = out
+	}
+}
+
 func BenchmarkPlannedAppendEager_WideQuery_100_10_StaticArg(b *testing.B) {
 	schema := benchutil.WideArgedSchemaWithXFieldsAndYItems(100, 10)
 	query := benchutil.WideArgedSchemaQueryWithVariable(100)

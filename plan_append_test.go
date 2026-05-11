@@ -495,6 +495,166 @@ func TestAppendInfoPath_ErrorLocation(t *testing.T) {
 	runParity(t, schema, `{ things { name } }`, "", nil, nil)
 }
 
+// TestAppendResolveAppend_Scalar exercises a field whose
+// ResolveAppend writes a JSON scalar directly. Output must match a
+// Resolve-based equivalent.
+func TestAppendResolveAppend_Scalar(t *testing.T) {
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"raw": &graphql.Field{
+					Type: graphql.String,
+					ResolveAppend: func(p graphql.ResolveParams, dst []byte) ([]byte, error) {
+						return append(dst, `"hello ☃"`...), nil
+					},
+				},
+				"resolved": &graphql.Field{
+					Type: graphql.String,
+					Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+						return "hello ☃", nil
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := source.NewSource(&source.Source{Body: []byte(`{ raw resolved }`), Name: "t"})
+	doc, _ := parser.Parse(parser.ParseParams{Source: src})
+	plan, _ := graphql.PlanQuery(&schema, doc, "")
+	got, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc}, nil)
+	if len(specErrs) > 0 {
+		t.Fatalf("spec errors: %v", specErrs)
+	}
+	want := `{"data":{"raw":"hello ☃","resolved":"hello ☃"}}`
+	if string(got) != want {
+		t.Fatalf("got %s\nwant %s", got, want)
+	}
+}
+
+// TestAppendResolveAppend_ObjectSubtree confirms ResolveAppend can
+// emit a full nested object literal, bypassing the planned sub-walk.
+// The implementer is on the hook for selection-set correctness.
+func TestAppendResolveAppend_ObjectSubtree(t *testing.T) {
+	point := graphql.NewObject(graphql.ObjectConfig{
+		Name: "Point",
+		Fields: graphql.Fields{
+			"x": &graphql.Field{Type: graphql.Int},
+			"y": &graphql.Field{Type: graphql.Int},
+		},
+	})
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"p": &graphql.Field{
+					Type: point,
+					ResolveAppend: func(p graphql.ResolveParams, dst []byte) ([]byte, error) {
+						return append(dst, `{"x":1,"y":2}`...), nil
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := source.NewSource(&source.Source{Body: []byte(`{ p { x y } }`), Name: "t"})
+	doc, _ := parser.Parse(parser.ParseParams{Source: src})
+	plan, _ := graphql.PlanQuery(&schema, doc, "")
+	got, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc}, nil)
+	if len(specErrs) > 0 {
+		t.Fatalf("spec errors: %v", specErrs)
+	}
+	want := `{"data":{"p":{"x":1,"y":2}}}`
+	if string(got) != want {
+		t.Fatalf("got %s\nwant %s", got, want)
+	}
+}
+
+// TestAppendResolveAppend_Error confirms a ResolveAppend error rolls
+// the field's bytes back and emits "null" with an errors entry, same
+// as the Resolve path.
+func TestAppendResolveAppend_Error(t *testing.T) {
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"good": &graphql.Field{
+					Type: graphql.String,
+					ResolveAppend: func(p graphql.ResolveParams, dst []byte) ([]byte, error) {
+						return append(dst, `"ok"`...), nil
+					},
+				},
+				"bad": &graphql.Field{
+					Type: graphql.String,
+					ResolveAppend: func(p graphql.ResolveParams, dst []byte) ([]byte, error) {
+						return dst, errors.New("boom")
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := source.NewSource(&source.Source{Body: []byte(`{ good bad }`), Name: "t"})
+	doc, _ := parser.Parse(parser.ParseParams{Source: src})
+	plan, _ := graphql.PlanQuery(&schema, doc, "")
+	got, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc}, nil)
+	if len(specErrs) > 0 {
+		t.Fatalf("spec errors: %v", specErrs)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("decode: %v\nbytes: %s", err, got)
+	}
+	data := decoded["data"].(map[string]interface{})
+	if data["good"] != "ok" {
+		t.Errorf("good = %v; want ok", data["good"])
+	}
+	if data["bad"] != nil {
+		t.Errorf("bad = %v; want nil", data["bad"])
+	}
+	errs, _ := decoded["errors"].([]interface{})
+	if len(errs) == 0 {
+		t.Errorf("expected errors entry; bytes: %s", got)
+	}
+}
+
+// TestAppendResolveAppend_NonNullError confirms ResolveAppend error
+// on a NonNull field bubbles up to the nearest nullable parent.
+func TestAppendResolveAppend_NonNullError(t *testing.T) {
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"v": &graphql.Field{
+					Type: graphql.NewNonNull(graphql.String),
+					ResolveAppend: func(p graphql.ResolveParams, dst []byte) ([]byte, error) {
+						return dst, errors.New("nope")
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := source.NewSource(&source.Source{Body: []byte(`{ v }`), Name: "t"})
+	doc, _ := parser.Parse(parser.ParseParams{Source: src})
+	plan, _ := graphql.PlanQuery(&schema, doc, "")
+	got, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc}, nil)
+	if len(specErrs) > 0 {
+		t.Fatalf("spec errors: %v", specErrs)
+	}
+	if !strings.Contains(string(got), `"data":null`) {
+		t.Errorf("expected data:null for unabsorbed NonNull bubble; got %s", got)
+	}
+}
+
 // TestAppendPartialLiteralArgs confirms a field whose arg list mixes
 // literals and variables sees both at execute time: the literal
 // pre-coerced at plan time and the variable resolved per request.

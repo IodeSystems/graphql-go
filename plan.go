@@ -1187,10 +1187,6 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	defer recoverPlannedField(&out, keyStart, fp, fieldPath, eCtx, pathDepth)
 
 	fieldDef := fp.fieldDef
-	resolveFn := fieldDef.Resolve
-	if resolveFn == nil {
-		resolveFn = DefaultResolveFn
-	}
 
 	// Default mode (poolArgs=true): borrow the args map from
 	// argsMapPool and release on the way out. Append-mode dethunks
@@ -1211,6 +1207,33 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	}
 	if len(fp.args.dynamicArgDefs) > 0 {
 		populateArgumentValues(args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues)
+	}
+
+	// ResolveAppend fast path. The resolver writes its complete JSON
+	// value directly to dst; we skip Serialize, leafEmitter, sub-
+	// selection recursion, and the result-interface boxing entirely.
+	// Errors propagate via panic through recoverPlannedField (rolls
+	// the field bytes back to keyStart, records the error, emits null
+	// or re-panics for NonNull). Extensions hooks do NOT fire for
+	// ResolveAppend fields — documented contract; the hook signature
+	// expects an interface{} result that doesn't exist on this path.
+	if fieldDef.ResolveAppend != nil {
+		out = append(dst, fp.responseKeyJSON...)
+		appended, err := fieldDef.ResolveAppend(ResolveParams{
+			Source:  source,
+			Args:    args,
+			Info:    info,
+			Context: eCtx.Context,
+		}, out)
+		if err != nil {
+			panic(gqlerrors.FormatError(err))
+		}
+		return appended
+	}
+
+	resolveFn := fieldDef.Resolve
+	if resolveFn == nil {
+		resolveFn = DefaultResolveFn
 	}
 
 	var resolveFieldFinishFn resolveFieldFinishFuncHandler

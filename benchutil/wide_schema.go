@@ -51,6 +51,84 @@ func generateWideFieldFromX(x int) *graphql.Field {
 	}
 }
 
+// WideSchemaResolveAppendWithXFieldsAndYItems mirrors
+// WideSchemaWithXFieldsAndYItems but every leaf field uses
+// ResolveAppend (writes JSON bytes directly) instead of Resolve. The
+// per-field output is identical, but the executor skips the
+// Serialize / leafEmitter / boxing chain entirely.
+func WideSchemaResolveAppendWithXFieldsAndYItems(x int, y int) graphql.Schema {
+	wide := graphql.NewObject(graphql.ObjectConfig{
+		Name:        "Wide",
+		Description: "An object",
+		Fields:      generateXWideFieldsResolveAppend(x),
+	})
+
+	queryType := graphql.NewObject(graphql.ObjectConfig{
+		Name: "Query",
+		Fields: graphql.Fields{
+			"wide": {
+				Type: graphql.NewList(wide),
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					out := make([]struct{}, 0, y)
+					for i := 0; i < y; i++ {
+						out = append(out, struct{}{})
+					}
+					return out, nil
+				},
+			},
+		},
+	})
+
+	wideSchema, _ := graphql.NewSchema(graphql.SchemaConfig{
+		Query: queryType,
+	})
+
+	return wideSchema
+}
+
+func generateXWideFieldsResolveAppend(x int) graphql.Fields {
+	fields := graphql.Fields{}
+	for i := 0; i < x; i++ {
+		fields[generateFieldNameFromX(i)] = &graphql.Field{
+			Type:          generateWideTypeFromX(i),
+			ResolveAppend: generateWideResolveAppendFromX(i),
+		}
+	}
+	return fields
+}
+
+func generateWideResolveAppendFromX(x int) graphql.FieldResolveAppendFn {
+	switch x % 8 {
+	case 0, 1:
+		// String / NonNull String
+		s := fmt.Sprintf(`"%d"`, x)
+		bytes := []byte(s)
+		return func(p graphql.ResolveParams, dst []byte) ([]byte, error) {
+			return append(dst, bytes...), nil
+		}
+	case 2, 3:
+		// Int / NonNull Int
+		return func(p graphql.ResolveParams, dst []byte) ([]byte, error) {
+			return append(dst, fmt.Sprintf("%d", x)...), nil
+		}
+	case 4, 5:
+		// Float / NonNull Float
+		return func(p graphql.ResolveParams, dst []byte) ([]byte, error) {
+			return append(dst, fmt.Sprintf("%g", float64(x))...), nil
+		}
+	case 6, 7:
+		// Boolean / NonNull Boolean
+		val := []byte("false")
+		if x%2 != 0 {
+			val = []byte("true")
+		}
+		return func(p graphql.ResolveParams, dst []byte) ([]byte, error) {
+			return append(dst, val...), nil
+		}
+	}
+	return nil
+}
+
 func generateWideTypeFromX(x int) graphql.Type {
 	switch x % 8 {
 	case 0:

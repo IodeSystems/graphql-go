@@ -495,6 +495,60 @@ func TestAppendInfoPath_ErrorLocation(t *testing.T) {
 	runParity(t, schema, `{ things { name } }`, "", nil, nil)
 }
 
+// TestAppendPartialLiteralArgs confirms a field whose arg list mixes
+// literals and variables sees both at execute time: the literal
+// pre-coerced at plan time and the variable resolved per request.
+func TestAppendPartialLiteralArgs(t *testing.T) {
+	var captured map[string]interface{}
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"users": &graphql.Field{
+					Type: graphql.String,
+					Args: graphql.FieldConfigArgument{
+						"first":  &graphql.ArgumentConfig{Type: graphql.Int},
+						"after":  &graphql.ArgumentConfig{Type: graphql.String},
+						"prefix": &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: "PFX"},
+					},
+					Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+						captured = map[string]interface{}{}
+						for k, v := range p.Args {
+							captured[k] = v
+						}
+						return "ok", nil
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := `query Q($c: String) { users(first: 10, after: $c) }`
+	src := source.NewSource(&source.Source{Body: []byte(query), Name: "t"})
+	doc, _ := parser.Parse(parser.ParseParams{Source: src})
+	plan, _ := graphql.PlanQuery(&schema, doc, "")
+
+	_, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
+		Schema: schema,
+		AST:    doc,
+		Args:   map[string]interface{}{"c": "abc"},
+	}, nil)
+	if len(specErrs) > 0 {
+		t.Fatalf("spec errors: %v", specErrs)
+	}
+	if got, want := captured["first"], 10; got != want {
+		t.Errorf("first = %v; want %v", got, want)
+	}
+	if got, want := captured["after"], "abc"; got != want {
+		t.Errorf("after = %v; want %v", got, want)
+	}
+	if got, want := captured["prefix"], "PFX"; got != want {
+		t.Errorf("prefix (default) = %v; want %v", got, want)
+	}
+}
+
 // TestAppendArgsPool_NonNilArgs confirms p.Args is non-nil under
 // the pooled default and that RetainArgs=true opt-out also works.
 // The pooled map must be a fresh-or-recycled empty map; the

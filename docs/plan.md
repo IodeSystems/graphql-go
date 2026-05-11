@@ -479,34 +479,44 @@ struct field, send it on a channel, or close over it inside a
 spawned goroutine break under pooling — flip `RetainArgs=true` and
 file an issue.
 
+### Phase 6.5 — Partial-literal arg pre-coercion
+
+**Done.**
+- [x] **`planArguments` now classifies per argDef.** Variable-bearing
+  args go into `argPlan.dynamicArgDefs` / `dynamicArgASTs`; literal
+  AST values + argDefs whose effective value is `argDef.DefaultValue`
+  are coerced once and stored in `argPlan.static`. The legacy
+  `hasVariables` flag and parallel argDefs/argASTs slices are gone.
+- [x] **Execute-time dispatch flattened.** Both walkers now do the
+  same two steps: `copy(args, static); populateArgumentValues(args,
+  dynamicDefs, dynamicASTs, vars)`. Bench numbers are flat on the
+  existing suite (no mixed-arg schemas) but real-schema fields like
+  `users(first: 10, after: $cursor)` skip the `first`-coerce work
+  on every request.
+
+No headline numbers — visible only on schemas with mixed-arg fields.
+Refactor is alloc-neutral on the existing bench suite.
+
 ### Investigation backlog
 
 Ranked by win-to-risk ratio. Numbers below are post-Phase-6 shares.
 
-1. **Plan-time partial-literal arg pre-coercion.** Today
-   `planArguments` is all-or-nothing: any `$variable` reference
-   forces full coercion at execute time. Pre-coercing the literal
-   subset cuts per-request coercion work on mixed arg lists.
-   Mostly helps multi-arg fields with one variable.
-
-   **Risk:** low. Mechanical refactor of `planArguments`.
-
-2. **Direct `DateTime` format into dst.** The current emitter calls
+1. **Direct `DateTime` format into dst.** The current emitter calls
    `t.MarshalText` then `appendJSONString(string(buf))`, paying one
    allocation per `DateTime` field. A direct format-into-`dst` version
    trims it. Doesn't dominate any bench but cheap and adopter-friendly.
 
-3. **Direct error-array emit on the envelope tail.** `json.Marshal(eCtx.Errors)`
+2. **Direct error-array emit on the envelope tail.** `json.Marshal(eCtx.Errors)`
    in `ExecutePlanAppend` is only hit when errors exist, so not on the
    hot path — but for error-heavy callers a direct
    `appendFormattedErrors` would skip another reflective walk.
 
-4. **`sync.Pool` for `eCtx.pathBuf`.** One slice alloc per request
+3. **`sync.Pool` for `eCtx.pathBuf`.** One slice alloc per request
    amortizes to near-zero with pooling; depth-bounded capacity makes
    the pool's discipline trivial. Marginal win — the single-slice
    alloc is small — but cheap.
 
-5. **Pool `ResolveInfo`-driving `ResolveParams` struct, or hoist into
+4. **Pool `ResolveInfo`-driving `ResolveParams` struct, or hoist into
    eCtx.** Each resolver call still stack-builds a `ResolveParams`
    struct that's pretty large. With escape analysis it stays on the
    stack today; if it ever escapes, pooling is the next move.
@@ -615,6 +625,8 @@ end-to-end wedge cited in the gateway's perf docs.
 | `values.go` | 6 | Extract `populateArgumentValues(dst, ...)` from `getArgumentValues`; drop the per-call `argASTMap` for a linear lookup. | landed |
 | `plan.go` | 6 | `writePlannedField` acquires from `argsMapPool` and `defer`-releases (append walker only — ExecutePlan's thunks defeat pooling). | landed |
 | `plan_append_test.go` | 6 | `TestAppendArgsPool_NonNilArgs` confirms `p.Args` is non-nil under both default-pool and `RetainArgs` modes. | landed |
+| `plan.go` | 6.5 | `argPlan` carries `static` + `dynamicArgDefs` / `dynamicArgASTs`; `planArguments` classifies per argDef so mixed-arg fields pre-coerce the literal subset; walkers' execute path is flattened to copy-static-then-resolve-dynamic. | landed |
+| `plan_append_test.go` | 6.5 | `TestAppendPartialLiteralArgs` covers a field with literal + variable + default-value args. | landed |
 | `definition.go` | 7 | Add `ResolveAppend` to `FieldDefinition` (`Field`). | pending |
 | `plan.go` | 7 | Walker branches on `ResolveAppend` presence. | pending |
 

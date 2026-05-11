@@ -97,25 +97,23 @@ type fieldPlan struct {
 	leafType Leaf
 }
 
-// argPlan separates static arg values (resolvable once, at plan
-// time) from dynamic ones (referenced via variables). The common
-// case — all literal args, or no args — yields a fully-built `static`
-// map and skips getArgumentValues at execute time entirely.
+// argPlan separates per-arg coercion into a plan-time slice
+// (literals + schema defaults — same per request, coerce once) and a
+// per-request slice (any arg whose AST references a `$variable`).
+// Mixed fields (some literal, some variable) get partial pre-coercion:
+// only the variable-bearing args run through populateArgumentValues at
+// execute time; the literal subset is copied verbatim from static.
 type argPlan struct {
-	// static holds the resolved arg map for the all-literals case.
-	// Read-only; the executor copies before handing to the resolver
-	// so the resolver can mutate without aliasing the plan.
+	// static holds the coerced literal / default subset. Read-only;
+	// the executor copies before handing to the resolver so the
+	// resolver can mutate without aliasing the plan. Empty when every
+	// arg references a variable.
 	static map[string]interface{}
 
-	// hasVariables forces the executor to fall through to the
-	// runtime getArgumentValues path. This is correct but slower; the
-	// goal is for the common literal-args case to skip it.
-	hasVariables bool
-
-	// fieldDefArgs / argASTs are kept for the dynamic fallback path;
-	// nil when hasVariables is false.
-	fieldDefArgs []*Argument
-	argASTs      []*ast.Argument
+	// dynamicArgDefs / dynamicArgASTs are the variable-bearing args
+	// (parallel slices). Empty when every arg is a literal/default.
+	dynamicArgDefs []*Argument
+	dynamicArgASTs []*ast.Argument
 }
 
 // PlanQuery walks the document, picks the named operation (or the
@@ -453,33 +451,53 @@ func makeEnumAppendJSON(en *Enum) AppendJSONFn {
 	}
 }
 
-// planArguments separates static arguments (all-literals → fully
-// resolvable at plan time) from dynamic ones (any variable reference
-// → defer to per-request getArgumentValues).
-//
-// We deliberately don't try to do partial pre-coercion (e.g.
-// literal-args mixed with one variable arg → coerce the literals
-// only) in this first cut: the all-or-nothing split is correct,
-// trivial, and captures the common case (the bench query has all
-// literal args).
+// planArguments walks argDefs and classifies each arg per request:
+// variable-bearing args defer to populateArgumentValues; literal args
+// (and args with no AST entry that fall back to argDef.DefaultValue)
+// are coerced once here and stored in argPlan.static. Mixed fields
+// see a partial pre-coercion — only the dynamic subset runs at
+// execute time.
 func planArguments(argDefs []*Argument, argASTs []*ast.Argument) argPlan {
 	if len(argDefs) == 0 && len(argASTs) == 0 {
 		return argPlan{}
 	}
-	if astHasVariables(argASTs) {
-		return argPlan{
-			hasVariables: true,
-			fieldDefArgs: argDefs,
-			argASTs:      argASTs,
+	var static map[string]interface{}
+	var dynDefs []*Argument
+	var dynASTs []*ast.Argument
+	for _, argDef := range argDefs {
+		var argAST *ast.Argument
+		for _, a := range argASTs {
+			if a != nil && a.Name != nil && a.Name.Value == argDef.PrivateName {
+				argAST = a
+				break
+			}
 		}
+		if argAST != nil && valueHasVariables(argAST.Value) {
+			dynDefs = append(dynDefs, argDef)
+			dynASTs = append(dynASTs, argAST)
+			continue
+		}
+		var value ast.Value
+		if argAST != nil {
+			value = argAST.Value
+		}
+		tmp := valueFromAST(value, argDef.Type, nil)
+		if isNullish(tmp) {
+			tmp = argDef.DefaultValue
+		}
+		if isNullish(tmp) {
+			continue
+		}
+		if static == nil {
+			static = map[string]interface{}{}
+		}
+		static[argDef.PrivateName] = tmp
 	}
-	// All-literal: coerce once. Pass nil variableValues — guaranteed
-	// no variable refs.
-	static := getArgumentValues(argDefs, argASTs, nil)
-	if len(static) == 0 {
-		return argPlan{}
+	return argPlan{
+		static:         static,
+		dynamicArgDefs: dynDefs,
+		dynamicArgASTs: dynASTs,
 	}
-	return argPlan{static: static}
 }
 
 // astHasVariables walks the argument AST tree looking for any
@@ -763,19 +781,12 @@ func resolvePlannedField(eCtx *executionContext, parentType *Object, source inte
 	// later (breadth-first), long after this function returns. The
 	// append-mode walker dethunks synchronously and can safely pool;
 	// see writePlannedField.
-	var args map[string]interface{}
-	switch {
-	case fp.args.hasVariables:
-		args = getArgumentValues(fp.args.fieldDefArgs, fp.args.argASTs, eCtx.VariableValues)
-	case fp.args.static != nil:
-		// Resolvers may mutate the args map; copy to keep the plan's
-		// static map immutable across requests.
-		args = make(map[string]interface{}, len(fp.args.static))
-		for k, v := range fp.args.static {
-			args[k] = v
-		}
-	default:
-		args = map[string]interface{}{}
+	args := make(map[string]interface{}, len(fp.args.static)+len(fp.args.dynamicArgDefs))
+	for k, v := range fp.args.static {
+		args[k] = v
+	}
+	if len(fp.args.dynamicArgDefs) > 0 {
+		populateArgumentValues(args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues)
 	}
 
 	info := ResolveInfo{
@@ -1189,32 +1200,17 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	// (struct fields, channels, goroutines outliving the resolver)
 	// must opt out via ExecuteParams.RetainArgs.
 	var args map[string]interface{}
-	switch {
-	case fp.args.hasVariables:
-		if eCtx.poolArgs {
-			args = acquireArgsMap()
-			populateArgumentValues(args, fp.args.fieldDefArgs, fp.args.argASTs, eCtx.VariableValues)
-		} else {
-			args = getArgumentValues(fp.args.fieldDefArgs, fp.args.argASTs, eCtx.VariableValues)
-		}
-	case fp.args.static != nil:
-		if eCtx.poolArgs {
-			args = acquireArgsMap()
-		} else {
-			args = make(map[string]interface{}, len(fp.args.static))
-		}
-		for k, v := range fp.args.static {
-			args[k] = v
-		}
-	default:
-		if eCtx.poolArgs {
-			args = acquireArgsMap()
-		} else {
-			args = map[string]interface{}{}
-		}
-	}
 	if eCtx.poolArgs {
+		args = acquireArgsMap()
 		defer releaseArgsMap(args)
+	} else {
+		args = make(map[string]interface{}, len(fp.args.static)+len(fp.args.dynamicArgDefs))
+	}
+	for k, v := range fp.args.static {
+		args[k] = v
+	}
+	if len(fp.args.dynamicArgDefs) > 0 {
+		populateArgumentValues(args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues)
 	}
 
 	var resolveFieldFinishFn resolveFieldFinishFuncHandler

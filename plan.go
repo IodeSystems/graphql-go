@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
+	"strconv"
 
 	"github.com/graphql-go/graphql/gqlerrors"
 	"github.com/graphql-go/graphql/language/ast"
@@ -1010,6 +1012,7 @@ func ExecutePlanAppend(plan *Plan, p ExecuteParams, dst []byte) ([]byte, []gqler
 		Operation:      plan.operation,
 		VariableValues: variableValues,
 		Context:        ctx,
+		lazyPath:       p.LazyPath,
 	}
 
 	dst = append(dst, `{"data":`...)
@@ -1096,7 +1099,14 @@ func writePlannedSelection(eCtx *executionContext, sp *selectionPlan, source int
 // NonNull fp.returnType the panic re-propagates (handleFieldError
 // re-panics) so the next nullable boundary above can absorb it.
 func writePlannedField(eCtx *executionContext, parentType *Object, source interface{}, fp *fieldPlan, path *ResponsePath, dst []byte) (out []byte) {
-	fieldPath := path.WithKey(fp.responseKey)
+	var fieldPath *ResponsePath
+	pathDepth := -1
+	if !eCtx.lazyPath {
+		fieldPath = path.WithKey(fp.responseKey)
+	} else {
+		pathDepth = len(eCtx.pathBuf)
+		eCtx.pathBuf = append(eCtx.pathBuf, fp.responseKey)
+	}
 	keyStart := len(dst)
 
 	info := ResolveInfo{
@@ -1113,7 +1123,7 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	}
 
 	out = dst
-	defer recoverPlannedField(&out, keyStart, fp, fieldPath, eCtx)
+	defer recoverPlannedField(&out, keyStart, fp, fieldPath, eCtx, pathDepth)
 
 	fieldDef := fp.fieldDef
 	resolveFn := fieldDef.Resolve
@@ -1167,7 +1177,7 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	}
 
 	out = append(dst, fp.responseKeyJSON...)
-	out = writeCompleteValueCatchingError(eCtx, fp.returnType, fp, info, fieldPath, result, out)
+	out = writeCompleteValueCatchingError(eCtx, fp.returnType, fp, info, fieldPath, result, out, -1)
 	return out
 }
 
@@ -1176,10 +1186,16 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 // forwards via handleFieldError; nullable returnType triggers a
 // `null` emission here (and an error recorded), NonNull returnType
 // re-panics for the parent to absorb.
-func writeCompleteValueCatchingError(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte) (out []byte) {
+//
+// pathEntry is the lazyPath depth captured before any push that the
+// caller wants this absorber to clean up (e.g. the per-item index
+// pushed by writeCompleteListValue). Pass -1 from sites that did not
+// push their own path key; the field-level pop is then left to
+// writePlannedField's recoverPlannedField.
+func writeCompleteValueCatchingError(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte, pathEntry int) (out []byte) {
 	out = dst
 	entryLen := len(dst)
-	defer recoverCompleteValue(&out, entryLen, fp, path, returnType, eCtx)
+	defer recoverCompleteValue(&out, entryLen, fp, path, returnType, eCtx, pathEntry)
 	out = writeCompleteValue(eCtx, returnType, fp, info, path, result, out, false)
 	return out
 }
@@ -1190,8 +1206,16 @@ func writeCompleteValueCatchingError(eCtx *executionContext, returnType Type, fp
 // only — NonNull paths re-panic from handleFieldError) emits
 // `"responseKey":null`. Lifted out of a closure so the defer record
 // can be open-coded onto the stack.
-func recoverPlannedField(out *[]byte, keyStart int, fp *fieldPlan, fieldPath *ResponsePath, eCtx *executionContext) {
+//
+// Always pops the lazyPath depth-stack to pathEntry before returning,
+// even when no panic fired: the recover handler is the convergence
+// point for both normal-return and panic-propagation paths out of the
+// field walk, so it owns the pop.
+func recoverPlannedField(out *[]byte, keyStart int, fp *fieldPlan, fieldPath *ResponsePath, eCtx *executionContext, pathEntry int) {
 	r := recover()
+	if pathEntry >= 0 {
+		defer eCtx.popPath(pathEntry)
+	}
 	if r == nil {
 		return
 	}
@@ -1206,8 +1230,15 @@ func recoverPlannedField(out *[]byte, keyStart int, fp *fieldPlan, fieldPath *Re
 // records the error (or re-panics for NonNull), and emits `null` at
 // the absorption point. Named-function defer keeps the record on
 // the stack.
-func recoverCompleteValue(out *[]byte, entryLen int, fp *fieldPlan, path *ResponsePath, returnType Type, eCtx *executionContext) {
+//
+// Pops the lazyPath depth-stack to pathEntry unconditionally (no-op
+// for -1 / non-lazy callers) so per-list-item pushes are cleaned up
+// on both normal-return and panic-propagation paths.
+func recoverCompleteValue(out *[]byte, entryLen int, fp *fieldPlan, path *ResponsePath, returnType Type, eCtx *executionContext, pathEntry int) {
 	r := recover()
+	if pathEntry >= 0 {
+		defer eCtx.popPath(pathEntry)
+	}
 	if r == nil {
 		return
 	}
@@ -1242,7 +1273,7 @@ func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, 
 			err := NewLocatedErrorWithPath(
 				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
 				FieldASTsToNodeASTs(fp.fieldASTs),
-				path.AsArray(),
+				eCtx.errorPathArray(path),
 			)
 			panic(gqlerrors.FormatError(err))
 		}
@@ -1278,14 +1309,51 @@ func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, 
 // fallback when no emitter is registered). Post-Serialize nil is
 // the spec's "Serialize failed" case: under NonNull it panics, else
 // "null" is emitted.
+//
+// Built-in scalars take a fast path that bypasses Serialize entirely
+// when the resolver returned the canonical Go type (string for
+// String/ID, int for Int, float64 for Float, bool for Boolean). The
+// generic Serialize+leafEmitter path would otherwise coerce the same
+// value twice (e.g. coerceString runs fmt.Sprintf on a plain string,
+// allocating a new string identical to the input). On a type-assertion
+// miss or a value the canonical path would null-out (Int overflow,
+// NaN/Inf float), control falls through to the generic path so the
+// existing spec-compliant behavior is preserved.
 func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte, nonNull bool) []byte {
+	switch fp.leafType {
+	case String, ID:
+		if s, ok := result.(string); ok {
+			return appendJSONString(dst, s)
+		}
+	case Boolean:
+		if b, ok := result.(bool); ok {
+			if b {
+				return append(dst, "true"...)
+			}
+			return append(dst, "false"...)
+		}
+	case Int:
+		if n, ok := result.(int); ok && n >= math.MinInt32 && n <= math.MaxInt32 {
+			return strconv.AppendInt(dst, int64(n), 10)
+		}
+	case Float:
+		if f, ok := result.(float64); ok && !math.IsNaN(f) && !math.IsInf(f, 0) {
+			abs := math.Abs(f)
+			fmtByte := byte('f')
+			if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+				fmtByte = 'e'
+			}
+			return strconv.AppendFloat(dst, f, fmtByte, -1, 64)
+		}
+	}
+
 	serialized := returnType.Serialize(result)
 	if isNullish(serialized) {
 		if nonNull {
 			err := NewLocatedErrorWithPath(
 				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
 				FieldASTsToNodeASTs(fp.fieldASTs),
-				path.AsArray(),
+				eCtx.errorPathArray(path),
 			)
 			panic(gqlerrors.FormatError(err))
 		}
@@ -1300,7 +1368,7 @@ func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPl
 			err := NewLocatedErrorWithPath(
 				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
 				FieldASTsToNodeASTs(fp.fieldASTs),
-				path.AsArray(),
+				eCtx.errorPathArray(path),
 			)
 			panic(gqlerrors.FormatError(err))
 		}
@@ -1335,8 +1403,15 @@ func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldP
 			dst = append(dst, ',')
 		}
 		val := resultVal.Index(i).Interface()
-		itemPath := path.WithKey(i)
-		dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, itemPath, val, dst)
+		var itemPath *ResponsePath
+		itemDepth := -1
+		if !eCtx.lazyPath {
+			itemPath = path.WithKey(i)
+		} else {
+			itemDepth = len(eCtx.pathBuf)
+			eCtx.pathBuf = append(eCtx.pathBuf, i)
+		}
+		dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, itemPath, val, dst, itemDepth)
 	}
 	return append(dst, ']')
 }

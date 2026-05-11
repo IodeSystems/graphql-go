@@ -402,3 +402,135 @@ func BenchmarkPlannedAppend_WideQuery_100_10_StaticArg(b *testing.B) {
 		buf = out
 	}
 }
+
+// BenchmarkPlannedAppendLazy_* mirrors BenchmarkPlannedAppend_* with
+// ExecuteParams.LazyPath=true: ResolveInfo.Path is nil for resolvers
+// and *ResponsePath nodes are only built on error. Measures the
+// upper-bound win when no resolver consults info.Path.
+
+func BenchmarkPlannedAppendLazy_WideQuery_100_10(b *testing.B) {
+	schema := benchutil.WideSchemaWithXFieldsAndYItems(100, 10)
+	query := benchutil.WideSchemaQuery(100)
+
+	src := source.NewSource(&source.Source{Body: []byte(query), Name: "bench"})
+	doc, err := parser.Parse(parser.ParseParams{Source: src})
+	if err != nil {
+		b.Fatalf("parse: %v", err)
+	}
+	plan, err := graphql.PlanQuery(&schema, doc, "")
+	if err != nil {
+		b.Fatalf("plan: %v", err)
+	}
+
+	buf := make([]byte, 0, 64*1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf = buf[:0]
+		out, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
+			Schema:   schema,
+			AST:      doc,
+			LazyPath: true,
+		}, buf)
+		if len(specErrs) > 0 {
+			b.Fatalf("spec errors: %v", specErrs)
+		}
+		buf = out
+	}
+}
+
+func BenchmarkPlannedAppendLazy_ListQuery_1K(b *testing.B) {
+	schema := benchutil.ListSchemaWithXItems(1000)
+	query := `query { colors { hex r g b } }`
+
+	src := source.NewSource(&source.Source{Body: []byte(query), Name: "bench"})
+	doc, err := parser.Parse(parser.ParseParams{Source: src})
+	if err != nil {
+		b.Fatalf("parse: %v", err)
+	}
+	plan, err := graphql.PlanQuery(&schema, doc, "")
+	if err != nil {
+		b.Fatalf("plan: %v", err)
+	}
+
+	buf := make([]byte, 0, 256*1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf = buf[:0]
+		out, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
+			Schema:   schema,
+			AST:      doc,
+			LazyPath: true,
+		}, buf)
+		if len(specErrs) > 0 {
+			b.Fatalf("spec errors: %v", specErrs)
+		}
+		buf = out
+	}
+}
+
+func BenchmarkPlannedAppendLazy_WideQuery_100_10_Varied(b *testing.B) {
+	schema := benchutil.WideArgedSchemaWithXFieldsAndYItems(100, 10)
+	query := benchutil.WideArgedSchemaQueryWithVariable(100)
+
+	src := source.NewSource(&source.Source{Body: []byte(query), Name: "bench"})
+	doc, err := parser.Parse(parser.ParseParams{Source: src})
+	if err != nil {
+		b.Fatalf("parse: %v", err)
+	}
+	plan, err := graphql.PlanQuery(&schema, doc, "")
+	if err != nil {
+		b.Fatalf("plan: %v", err)
+	}
+
+	buf := make([]byte, 0, 64*1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf = buf[:0]
+		out, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
+			Schema:   schema,
+			AST:      doc,
+			Args:     map[string]interface{}{"v": fmt.Sprintf("v-%d", i)},
+			LazyPath: true,
+		}, buf)
+		if len(specErrs) > 0 {
+			b.Fatalf("spec errors: %v", specErrs)
+		}
+		buf = out
+	}
+}
+
+func BenchmarkPlannedAppendLazy_WideQuery_100_10_StaticArg(b *testing.B) {
+	schema := benchutil.WideArgedSchemaWithXFieldsAndYItems(100, 10)
+	query := benchutil.WideArgedSchemaQueryWithVariable(100)
+
+	src := source.NewSource(&source.Source{Body: []byte(query), Name: "bench"})
+	doc, err := parser.Parse(parser.ParseParams{Source: src})
+	if err != nil {
+		b.Fatalf("parse: %v", err)
+	}
+	plan, err := graphql.PlanQuery(&schema, doc, "")
+	if err != nil {
+		b.Fatalf("plan: %v", err)
+	}
+	args := map[string]interface{}{"v": "static"}
+
+	buf := make([]byte, 0, 64*1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf = buf[:0]
+		out, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
+			Schema:   schema,
+			AST:      doc,
+			Args:     args,
+			LazyPath: true,
+		}, buf)
+		if len(specErrs) > 0 {
+			b.Fatalf("spec errors: %v", specErrs)
+		}
+		buf = out
+	}
+}

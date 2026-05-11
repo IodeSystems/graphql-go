@@ -21,6 +21,16 @@ type ExecuteParams struct {
 	// Context may be provided to pass application-specific per-request
 	// information to resolve functions.
 	Context context.Context
+
+	// LazyPath, when true, opts the append-mode executor
+	// (ExecutePlanAppend) into a depth-stack representation of the
+	// response path: ResolveInfo.Path is left nil for every resolver
+	// call, and *ResponsePath nodes are only materialized when an
+	// error fires. Reclaims one alloc per resolved field and per list
+	// item. Contract: every resolver in the schema must tolerate a
+	// nil info.Path — DataLoader / tracing / federation patterns that
+	// key on info.Path are incompatible. Has no effect on ExecutePlan.
+	LazyPath bool
 }
 
 // Execute runs an operation against a schema. Behavior is unchanged
@@ -55,6 +65,43 @@ type executionContext struct {
 	VariableValues map[string]interface{}
 	Errors         []gqlerrors.FormattedError
 	Context        context.Context
+
+	// lazyPath mirrors ExecuteParams.LazyPath. When true, the
+	// append-mode walker uses pathBuf as the authoritative depth-stack
+	// for the response path and skips per-field *ResponsePath
+	// allocation. Always false for the map-tree executor.
+	lazyPath bool
+	pathBuf  []interface{}
+}
+
+// popPath truncates pathBuf back to the depth captured at the
+// caller's push site. The walker open-codes the push (a branch on
+// eCtx.lazyPath either WithKey-allocates or appends to pathBuf) but
+// routes the pop through here so the deferred recover handlers
+// converge on a single helper for both normal-return and
+// panic-propagation paths.
+func (eCtx *executionContext) popPath(entryDepth int) {
+	if entryDepth < 0 || !eCtx.lazyPath {
+		return
+	}
+	eCtx.pathBuf = eCtx.pathBuf[:entryDepth]
+}
+
+// errorPathArray returns the response-path locator for an error
+// envelope. Under default mode the linked-list *ResponsePath argument
+// is walked; under lazyPath the pathBuf depth-stack is snapshotted.
+// Caller is responsible for not retaining the returned slice past the
+// next pushPath/popPath cycle.
+func (eCtx *executionContext) errorPathArray(path *ResponsePath) []interface{} {
+	if path != nil {
+		return path.AsArray()
+	}
+	if !eCtx.lazyPath || len(eCtx.pathBuf) == 0 {
+		return nil
+	}
+	out := make([]interface{}, len(eCtx.pathBuf))
+	copy(out, eCtx.pathBuf)
+	return out
 }
 
 func buildExecutionContext(p buildExecutionCtxParams) (*executionContext, error) {
@@ -419,7 +466,7 @@ func getFieldEntryKey(node *ast.Field) string {
 }
 
 func handleFieldError(r interface{}, fieldNodes []ast.Node, path *ResponsePath, returnType Output, eCtx *executionContext) {
-	err := NewLocatedErrorWithPath(r, fieldNodes, path.AsArray())
+	err := NewLocatedErrorWithPath(r, fieldNodes, eCtx.errorPathArray(path))
 	// send panic upstream
 	if _, ok := returnType.(*NonNull); ok {
 		panic(err)

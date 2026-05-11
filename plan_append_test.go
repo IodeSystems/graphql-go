@@ -56,15 +56,34 @@ func runParity(t *testing.T, schema graphql.Schema, query, opName string, args m
 		t.Fatalf("append spec errors: %v", specErrs)
 	}
 
-	var mapDecoded, appendDecoded interface{}
+	lazyBytes, lazySpecErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
+		Schema:        schema,
+		AST:           doc,
+		OperationName: opName,
+		Args:          args,
+		Root:          root,
+		Context:       context.Background(),
+		LazyPath:      true,
+	}, nil)
+	if len(lazySpecErrs) > 0 {
+		t.Fatalf("append (lazyPath) spec errors: %v", lazySpecErrs)
+	}
+
+	var mapDecoded, appendDecoded, lazyDecoded interface{}
 	if err := json.Unmarshal(mapBytes, &mapDecoded); err != nil {
 		t.Fatalf("decode map: %v\nbytes: %s", err, mapBytes)
 	}
 	if err := json.Unmarshal(appendBytes, &appendDecoded); err != nil {
 		t.Fatalf("decode append: %v\nbytes: %s", err, appendBytes)
 	}
+	if err := json.Unmarshal(lazyBytes, &lazyDecoded); err != nil {
+		t.Fatalf("decode append (lazyPath): %v\nbytes: %s", err, lazyBytes)
+	}
 	if !reflect.DeepEqual(mapDecoded, appendDecoded) {
 		t.Fatalf("parity mismatch:\n  ExecutePlan:       %s\n  ExecutePlanAppend: %s", mapBytes, appendBytes)
+	}
+	if !reflect.DeepEqual(appendDecoded, lazyDecoded) {
+		t.Fatalf("LazyPath parity mismatch:\n  ExecutePlanAppend:           %s\n  ExecutePlanAppend(LazyPath):  %s", appendBytes, lazyBytes)
 	}
 }
 
@@ -388,4 +407,86 @@ func TestAppendByteShape(t *testing.T) {
 	if !strings.HasPrefix(string(got), `{"data":`) || !strings.HasSuffix(string(got), `}`) {
 		t.Fatalf("envelope shape wrong: %s", got)
 	}
+}
+
+// TestAppendLazyPath_InfoPathIsNil confirms the contract advertised
+// by ExecuteParams.LazyPath: every resolver sees info.Path == nil.
+// Default mode (LazyPath=false) must still populate info.Path.
+func TestAppendLazyPath_InfoPathIsNil(t *testing.T) {
+	var sawPath, sawNil bool
+	probe := func(p graphql.ResolveParams) (interface{}, error) {
+		if p.Info.Path == nil {
+			sawNil = true
+		} else {
+			sawPath = true
+		}
+		return "ok", nil
+	}
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"v": &graphql.Field{Type: graphql.String, Resolve: probe},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := source.NewSource(&source.Source{Body: []byte(`{ v }`), Name: "t"})
+	doc, _ := parser.Parse(parser.ParseParams{Source: src})
+	plan, _ := graphql.PlanQuery(&schema, doc, "")
+
+	sawPath, sawNil = false, false
+	_, _ = graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc}, nil)
+	if !sawPath || sawNil {
+		t.Fatalf("default mode: want non-nil info.Path; sawPath=%v sawNil=%v", sawPath, sawNil)
+	}
+
+	sawPath, sawNil = false, false
+	_, _ = graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc, LazyPath: true}, nil)
+	if sawPath || !sawNil {
+		t.Fatalf("lazy mode: want nil info.Path; sawPath=%v sawNil=%v", sawPath, sawNil)
+	}
+}
+
+// TestAppendLazyPath_ErrorLocation confirms that error envelopes
+// under LazyPath carry the same `path` array as the default-mode
+// envelope — the depth-stack snapshot must reconstruct the same
+// locator that AsArray() builds from a linked list.
+func TestAppendLazyPath_ErrorLocation(t *testing.T) {
+	thing := graphql.NewObject(graphql.ObjectConfig{
+		Name: "Thing",
+		Fields: graphql.Fields{
+			"name": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.String),
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					if s, ok := p.Source.(map[string]interface{}); ok {
+						return s["name"], nil
+					}
+					return nil, errors.New("bad source")
+				},
+			},
+		},
+	})
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"things": &graphql.Field{
+					Type: graphql.NewList(thing),
+					Resolve: func(graphql.ResolveParams) (interface{}, error) {
+						return []map[string]interface{}{
+							{"name": "ok"},
+							{"name": nil},
+						}, nil
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runParity(t, schema, `{ things { name } }`, "", nil, nil)
 }

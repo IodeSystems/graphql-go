@@ -260,8 +260,8 @@ tree's per-row scalar boxing dominates there.
   byte equality with `json.Marshal` for edge magnitudes
   (1e-7, 1e21, denormals) would be cheap insurance.
 - `DateTime`'s emitter pays a `t.MarshalText` allocation per call.
-  Bench shows it doesn't dominate, but a direct format-into-dst
-  version is a Phase 2 candidate.
+  Bench shows it doesn't dominate; tracked as investigation-backlog
+  item #4.
 - Walker dethunks resolver thunks eagerly (single function call,
   per the plan). Workloads with parallel-thunk-friendly resolvers
   should stay on `ExecutePlan`. Documented in `ExecutePlanAppend`'s
@@ -299,40 +299,102 @@ hardware as Phase 1):
 | WideQuery_100_10_StaticArg | −33 % | −61 % | −33 % |
 | ListQuery_1K | −58 % | −88 % | −47 % |
 
+### Phase 3 — Inline scalar fast path for built-ins
+
+**Done.**
+- [x] **Pointer-equality switch on `fp.leafType` in `writeCompleteLeafValue`.**
+  When the resolver returned the canonical Go type (`string` for
+  `String`/`ID`, `int` in `int32` range for `Int`, finite `float64`
+  for `Float`, `bool` for `Boolean`), emit directly and skip the
+  `Serialize` + `leafEmitter` round-trip. Spec-edge inputs
+  (`*string`, `int64` overflow, NaN/Inf, non-canonical types) fall
+  through to the generic path unchanged.
+
+The win is concentrated on String: `coerceString(string)` was
+running `fmt.Sprintf("%v", s)` per call — one alloc per string
+field on the hot path, identical content out. Int/Float/Bool save
+CPU only (one fewer virtual `Serialize` dispatch + one redundant
+type-switch).
+
+**Headline numbers** (vs `ExecutePlan` map-tree baseline, same
+hardware as Phase 1):
+
+| Bench | ns/op Δ | B/op Δ | allocs/op Δ |
+|---|---|---|---|
+| WideQuery_100_10 | −55 % | −87 % | −47 % |
+| WideQuery_100_10_Varied | −43 % | −62 % | −42 % |
+| WideQuery_100_10_StaticArg | −43 % | −62 % | −42 % |
+| ListQuery_1K | −62 % | −88 % | −53 % |
+
+Delta vs Phase 2 alone: ~10 % additional ns/op on the wide queries,
+~5 % on the list query; ~10–15 % additional allocs/op everywhere.
+Exceeded the predicted 5–10 % CPU because the String Sprintf alloc
+was bigger than the alloc profile read suggested.
+
+### Phase 4 — Lazy `ResponsePath` (opt-in `LazyPath` flag)
+
+**Done.**
+- [x] **`ExecuteParams.LazyPath bool`** opts append-mode into a
+  depth-stack representation of the response path. The walker stops
+  threading `*ResponsePath` and pushes raw keys into
+  `eCtx.pathBuf` instead; `ResolveInfo.Path` is left **nil** for
+  every resolver call.
+- [x] **`*ResponsePath` is no longer built on the happy path** under
+  `LazyPath=true`. Reclaims ~1 alloc per resolved field and per list
+  item (~1011 of the 3738 allocs on `BenchmarkPlannedAppend_WideQuery_100_10`,
+  ~2000 on `ListQuery_1K`).
+- [x] **Error envelope `path` still spec-correct.** `eCtx.errorPathArray`
+  snapshots `pathBuf` (single slice copy, depth-bounded) at the
+  moment an error fires; bytes are identical to the linked-list
+  `AsArray` output.
+- [x] **Parity coverage.** `runParity` now cross-runs every existing
+  test under `LazyPath=true` and asserts JSON equivalence with both
+  the default append path and `ExecutePlan`. New tests pin the
+  contract: `info.Path` is non-nil in default mode and nil under
+  `LazyPath`; error envelopes carry the same path locator either
+  way.
+
+**Contract caveat.** `LazyPath` is an explicit "no resolver in this
+schema reads `info.Path`" assertion by the caller. Resolvers that
+key DataLoader cache entries, tracing spans, or federation refs on
+`info.Path` will nil-deref. Default is `false` (today's behavior),
+so nothing existing breaks unless callers opt in.
+
+**Headline numbers** (vs `ExecutePlan` map-tree baseline, same
+hardware as Phase 1; `LazyPath=true`):
+
+| Bench | ns/op Δ | B/op Δ | allocs/op Δ |
+|---|---|---|---|
+| WideQuery_100_10 | −58 % | −90 % | −61 % |
+| WideQuery_100_10_Varied | −45 % | −64 % | −55 % |
+| WideQuery_100_10_StaticArg | −46 % | −64 % | −55 % |
+| ListQuery_1K | −64 % | −91 % | −68 % |
+
+Delta `LazyPath=true` vs `LazyPath=false` on the same change:
+ns/op −11 % to −13 %, B/op −25 % to −27 %, allocs/op −22 % to −32 %.
+`ListQuery_1K` wins the most because the list-index push fires once
+per item.
+
+**Followups / caveats.**
+- Default mode (`LazyPath=false`) carries a small CPU regression
+  (~3 % on wide, ~6 % on list) from the per-push branch on
+  `eCtx.lazyPath` and the extra `pathEntry` plumbing into the
+  recover handlers. Alloc count and B/op are unchanged. Acceptable
+  for an opt-in feature; if the regression bothers anyone, the two
+  walker sites can be split into separate functions per mode.
+- A future refinement could pool `eCtx.pathBuf` across requests via
+  `sync.Pool`; the buffer's depth-bounded capacity makes it a clean
+  pool target. Not done because the bench numbers already reclaimed
+  the alloc — the buffer's growth is one alloc/request amortized.
+
 ### Investigation backlog
 
 Ranked by win-to-risk ratio. Pull from the top when there's appetite
 for another round; each entry stands alone and can ship without the
-others. Numbers below are post-Phase-2 alloc-profile shares on
-`BenchmarkPlannedAppend_WideQuery_100_10`.
+others. Numbers below are post-Phase-4 alloc-profile shares on
+`BenchmarkPlannedAppendLazy_WideQuery_100_10`.
 
-1. **Inline scalar emit fast path for built-ins.** Cleanest win-to-risk
-   ratio. `writeCompleteLeafValue` calls `returnType.Serialize` then
-   `fp.leafEmitter`; for `String`/`Int`/`Float`/`Boolean`/`ID` the two
-   amount to the same coercion done twice. A pointer-equality fast
-   path (`switch fp.leafType { case String: appendJSONString(dst,
-   raw.(string)) }`) skips the redundant call.
-
-   **Expected:** ~5–10 % CPU saved (the `coerceString` / `coerceFloat`
-   entries in the alloc profile). Zero contract change, zero risk.
-
-2. **`ResponsePath.WithKey` lazy materialization.** ~21 % of remaining
-   append-mode allocs. Each resolved field today builds a fresh
-   `*ResponsePath{Prev, Key}`; for error-free responses every one is
-   wasted.
-
-   Plan: replace `info.Path` with a value-type "path cursor"
-   (`{prev *ResponsePath, key interface{}}` — on the stack) that
-   `WithKey` returns by value; only materialize the linked
-   `*ResponsePath` lazily inside `path.AsArray()` (the only error-side
-   consumer) and inside `info.Path` if a resolver reads it.
-
-   **Risk:** `info.Path` is a documented resolver field. Survey: how
-   many adopters read it on the happy path? If "few," ship an opt-in
-   flag (`ExecuteParams.LazyPath bool`) that swaps in the cursor type.
-   Out of scope for append-mode alone, but the biggest single number.
-
-3. **Args map pool (with contract change).** `make(map[string]interface{},
+1. **Args map pool (with contract change).** `make(map[string]interface{},
    ...)` and `map[string]interface{}{}` are still 1 alloc per field
    (~1000 allocs on the wide bench). A `sync.Pool` of args maps with a
    clean-and-return discipline reclaims that, *if* resolvers agree not
@@ -340,9 +402,9 @@ others. Numbers below are post-Phase-2 alloc-profile shares on
 
    **Risk:** breaks any resolver that stashes `p.Args` in a struct
    field. Mitigate by gating behind a per-schema flag (`PoolArgs
-   bool`) or a `ResolveAppend`-only path (Phase 3).
+   bool`) or a `ResolveAppend`-only path (Phase 5).
 
-4. **Plan-time partial-literal arg pre-coercion.** Today
+2. **Plan-time partial-literal arg pre-coercion.** Today
    `planArguments` is all-or-nothing: any `$variable` reference
    forces full `getArgumentValues` at execute time. Pre-coercing the
    literal subset cuts per-request coercion work on mixed arg lists.
@@ -350,17 +412,22 @@ others. Numbers below are post-Phase-2 alloc-profile shares on
 
    **Risk:** low. Mechanical refactor of `planArguments`.
 
-5. **Direct `DateTime` format into dst.** The current emitter calls
+3. **Direct `DateTime` format into dst.** The current emitter calls
    `t.MarshalText` then `appendJSONString(string(buf))`, paying one
    allocation per `DateTime` field. A direct format-into-`dst` version
    trims it. Doesn't dominate any bench but cheap and adopter-friendly.
 
-6. **Direct error-array emit on the envelope tail.** `json.Marshal(eCtx.Errors)`
+4. **Direct error-array emit on the envelope tail.** `json.Marshal(eCtx.Errors)`
    in `ExecutePlanAppend` is only hit when errors exist, so not on the
    hot path — but for error-heavy callers a direct
    `appendFormattedErrors` would skip another reflective walk.
 
-### Phase 3 — Resolver-side append API (~3-5 days)
+5. **`sync.Pool` for `eCtx.pathBuf` under LazyPath.** One slice alloc
+   per request amortizes to near-zero with pooling; depth-bounded
+   capacity makes the pool's discipline trivial. Marginal win — the
+   single-slice alloc is small — but cheap.
+
+### Phase 5 — Resolver-side append API (~3-5 days)
 
 Opt-in. Lets downstream resolvers write JSON directly to the buffer
 instead of returning `interface{}`. Removes the last boxing step and
@@ -378,7 +445,7 @@ serialize themselves.
   scope.
 
 **Expected:** ~30-50 additional allocs reclaimed when the adopter
-goes all-in. Compound with Phase 1 + 2 to reach the projected 3-4×
+goes all-in. Compound with Phases 1–4 to reach the projected 3-4×
 end-to-end wedge cited in the gateway's perf docs.
 
 ---
@@ -413,7 +480,7 @@ end-to-end wedge cited in the gateway's perf docs.
    `bytes.Buffer` and `Write` at the end; adopters wanting
    `http.ResponseWriter` write to a pooled buffer then one
    `w.Write(buf)`.
-5. **`ResolveAppend` API stability** (Phase 3). Once exposed, hard
+5. **`ResolveAppend` API stability** (Phase 5). Once exposed, hard
    to remove. Mitigation: keep it experimental — package doc warns
    that the signature may change pre-1.0 of this fork; existing
    `Resolve` remains the documented stable surface.
@@ -451,9 +518,14 @@ end-to-end wedge cited in the gateway's perf docs.
 | `scalars.go` | 1 | Default `AppendJSON` for built-in scalars; shared `appendJSONString` helper. | landed |
 | `plan_bench_test.go` | 1 | `BenchmarkPlannedAppend_*` siblings. | landed |
 | `plan_append_test.go` | 1 | Cross-run parity helper + coverage matrix. | landed |
-| `plan.go` | 2 | `ResolveParams` + args-map pools. | pending |
-| `definition.go` | 3 | Add `ResolveAppend` to `FieldDefinition` (`Field`). | pending |
-| `plan.go` | 3 | Walker branches on `ResolveAppend` presence. | pending |
+| `plan.go` | 2 | Hoist `&info` into the extensions slow-path branch; open-code the per-field recover (was scoped as `ResolveParams` + args-map pools; pivoted — see Phase 2). | landed |
+| `plan.go` | 3 | Inline canonical-Go-type fast path in `writeCompleteLeafValue` for `String` / `ID` / `Int` / `Float` / `Boolean`. | landed |
+| `executor.go` | 4 | Add `ExecuteParams.LazyPath`; add `lazyPath` / `pathBuf` to `executionContext`; add `popPath` / `errorPathArray` helpers; route `handleFieldError` through `errorPathArray`. | landed |
+| `plan.go` | 4 | Branch on `eCtx.lazyPath` at `writePlannedField` + `writeCompleteListValue` push sites; thread `pathEntry` through `recoverPlannedField` / `recoverCompleteValue` for the unwind. | landed |
+| `plan_append_test.go` | 4 | `runParity` cross-runs `LazyPath=true`; new tests pin `info.Path` contract and error-location parity. | landed |
+| `plan_bench_test.go` | 4 | `BenchmarkPlannedAppendLazy_*` siblings. | landed |
+| `definition.go` | 5 | Add `ResolveAppend` to `FieldDefinition` (`Field`). | pending |
+| `plan.go` | 5 | Walker branches on `ResolveAppend` presence. | pending |
 
 ### Append-mode invariants (for reviewers)
 

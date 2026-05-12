@@ -980,6 +980,14 @@ type Enum struct {
 	values       []*EnumValueDefinition
 	valuesLookup map[interface{}]*EnumValueDefinition
 	nameLookup   map[string]*EnumValueDefinition
+	// valueToJSON maps each enum's Go value to its pre-encoded JSON
+	// bytes (`"NAME"` including the surrounding quotes). Built at
+	// schema-build time. Lets the executor append the response form
+	// of an enum without going through Serialize (reflect + map
+	// lookup) and appendJSONString (per-byte escape scan — never
+	// needed since GraphQL spec restricts enum names to
+	// /[_A-Za-z][_0-9A-Za-z]*/, no JSON-escape characters possible).
+	valueToJSON map[interface{}][]byte
 
 	err error
 }
@@ -1013,6 +1021,15 @@ func NewEnum(config EnumConfig) *Enum {
 	gt.PrivateDescription = config.Description
 	if gt.values, gt.err = gt.defineEnumValues(config.Values); gt.err != nil {
 		return gt
+	}
+
+	gt.valueToJSON = make(map[interface{}][]byte, len(gt.values))
+	for _, v := range gt.values {
+		encoded := make([]byte, 0, len(v.Name)+2)
+		encoded = append(encoded, '"')
+		encoded = append(encoded, v.Name...)
+		encoded = append(encoded, '"')
+		gt.valueToJSON[v.Value] = encoded
 	}
 
 	return gt

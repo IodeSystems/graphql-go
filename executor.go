@@ -615,6 +615,62 @@ type FieldResolver interface {
 	Resolve(p ResolveParams) (interface{}, error)
 }
 
+// defaultResolveCache memoizes the struct-field walk done by
+// DefaultResolveFn on its first hit for a given (struct type, GraphQL
+// field name) pair. Value is the matching struct field index, or -1 if
+// no field matched. Skips per-call NumField iteration, per-field
+// strings.EqualFold + Tag.Get + strings.Split, and the per-field
+// closure allocation in the original loop.
+//
+// reflect.Type identity is stable for a given Go type, so the cache
+// never invalidates. Bounded in practice by (distinct source struct
+// types × distinct GraphQL field names exercised against them).
+var defaultResolveCache sync.Map
+
+type defaultResolveKey struct {
+	t reflect.Type
+	n string
+}
+
+// resolveDefaultStructField runs DefaultResolveFn's struct-field
+// matching rules (case-insensitive Go field name, then `json` tag,
+// then `graphql` tag — first match wins, scanning in declaration
+// order), caching the resolved index. -1 means no field on sourceType
+// matches fieldName.
+func resolveDefaultStructField(sourceType reflect.Type, fieldName string) int {
+	key := defaultResolveKey{t: sourceType, n: fieldName}
+	if cached, ok := defaultResolveCache.Load(key); ok {
+		return cached.(int)
+	}
+	idx := -1
+	for i := 0; i < sourceType.NumField(); i++ {
+		typeField := sourceType.Field(i)
+		if strings.EqualFold(typeField.Name, fieldName) {
+			idx = i
+			break
+		}
+		if tagFirstSegmentEquals(typeField.Tag.Get("json"), fieldName) ||
+			tagFirstSegmentEquals(typeField.Tag.Get("graphql"), fieldName) {
+			idx = i
+			break
+		}
+	}
+	defaultResolveCache.Store(key, idx)
+	return idx
+}
+
+// tagFirstSegmentEquals reports whether the first comma-separated
+// segment of tag equals want. Allocation-free vs. strings.Split.
+func tagFirstSegmentEquals(tag, want string) bool {
+	if tag == "" {
+		return false
+	}
+	if comma := strings.IndexByte(tag, ','); comma >= 0 {
+		return tag[:comma] == want
+	}
+	return tag == want
+}
+
 // DefaultResolveFn If a resolve function is not given, then a default resolve behavior is used
 // which takes the property of the source object of the same name as the field
 // and returns it as the result, or if it's a function, returns the result
@@ -635,32 +691,11 @@ func DefaultResolveFn(p ResolveParams) (interface{}, error) {
 	}
 
 	if sourceVal.Type().Kind() == reflect.Struct {
-		for i := 0; i < sourceVal.NumField(); i++ {
-			valueField := sourceVal.Field(i)
-			typeField := sourceVal.Type().Field(i)
-			// try matching the field name first
-			if strings.EqualFold(typeField.Name, p.Info.FieldName) {
-				return valueField.Interface(), nil
-			}
-			tag := typeField.Tag
-			checkTag := func(tagName string) bool {
-				t := tag.Get(tagName)
-				tOptions := strings.Split(t, ",")
-				if len(tOptions) == 0 {
-					return false
-				}
-				if tOptions[0] != p.Info.FieldName {
-					return false
-				}
-				return true
-			}
-			if checkTag("json") || checkTag("graphql") {
-				return valueField.Interface(), nil
-			} else {
-				continue
-			}
+		idx := resolveDefaultStructField(sourceVal.Type(), p.Info.FieldName)
+		if idx < 0 {
+			return nil, nil
 		}
-		return nil, nil
+		return sourceVal.Field(idx).Interface(), nil
 	}
 
 	// try p.Source as a map[string]interface

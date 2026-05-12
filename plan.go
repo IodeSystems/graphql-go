@@ -1205,7 +1205,11 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 
 	fieldDef := fp.fieldDef
 
-	// Default mode (poolArgs=true): borrow the args map from
+	// Fast path for arg-less fields: hand back the shared empty
+	// singleton, skip pool churn entirely. p.Args is contractually
+	// read-only and len==0 means nothing to read or mutate.
+	//
+	// Otherwise (poolArgs=true, the default): borrow the args map from
 	// argsMapPool and release on the way out. Append-mode dethunks
 	// synchronously inside writeCompleteValue, so any thunk that
 	// closes over p.Args has finished using it before the deferred
@@ -1213,17 +1217,21 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	// (struct fields, channels, goroutines outliving the resolver)
 	// must opt out via ExecuteParams.RetainArgs.
 	var args map[string]interface{}
-	if eCtx.poolArgs {
-		args = acquireArgsMap()
-		defer releaseArgsMap(args)
+	if len(fp.args.static) == 0 && len(fp.args.dynamicArgDefs) == 0 {
+		args = emptyArgsMap
 	} else {
-		args = make(map[string]interface{}, len(fp.args.static)+len(fp.args.dynamicArgDefs))
-	}
-	for k, v := range fp.args.static {
-		args[k] = v
-	}
-	if len(fp.args.dynamicArgDefs) > 0 {
-		populateArgumentValues(args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues)
+		if eCtx.poolArgs {
+			args = acquireArgsMap()
+			defer releaseArgsMap(args)
+		} else {
+			args = make(map[string]interface{}, len(fp.args.static)+len(fp.args.dynamicArgDefs))
+		}
+		for k, v := range fp.args.static {
+			args[k] = v
+		}
+		if len(fp.args.dynamicArgDefs) > 0 {
+			populateArgumentValues(args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues)
+		}
 	}
 
 	// ResolveAppend fast path. The resolver writes its complete JSON
@@ -1430,30 +1438,43 @@ func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, 
 // NaN/Inf float), control falls through to the generic path so the
 // existing spec-compliant behavior is preserved.
 func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte, nonNull bool) []byte {
-	switch fp.leafType {
-	case String, ID:
-		if s, ok := result.(string); ok {
-			return appendJSONString(dst, s)
-		}
-	case Boolean:
-		if b, ok := result.(bool); ok {
-			if b {
-				return append(dst, "true"...)
+	switch t := fp.leafType.(type) {
+	case *Scalar:
+		switch t {
+		case String, ID:
+			if s, ok := result.(string); ok {
+				return appendJSONString(dst, s)
 			}
-			return append(dst, "false"...)
-		}
-	case Int:
-		if n, ok := result.(int); ok && n >= math.MinInt32 && n <= math.MaxInt32 {
-			return strconv.AppendInt(dst, int64(n), 10)
-		}
-	case Float:
-		if f, ok := result.(float64); ok && !math.IsNaN(f) && !math.IsInf(f, 0) {
-			abs := math.Abs(f)
-			fmtByte := byte('f')
-			if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
-				fmtByte = 'e'
+		case Boolean:
+			if b, ok := result.(bool); ok {
+				if b {
+					return append(dst, "true"...)
+				}
+				return append(dst, "false"...)
 			}
-			return strconv.AppendFloat(dst, f, fmtByte, -1, 64)
+		case Int:
+			if n, ok := result.(int); ok && n >= math.MinInt32 && n <= math.MaxInt32 {
+				return strconv.AppendInt(dst, int64(n), 10)
+			}
+		case Float:
+			if f, ok := result.(float64); ok && !math.IsNaN(f) && !math.IsInf(f, 0) {
+				abs := math.Abs(f)
+				fmtByte := byte('f')
+				if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+					fmtByte = 'e'
+				}
+				return strconv.AppendFloat(dst, f, fmtByte, -1, 64)
+			}
+		}
+	case *Enum:
+		// Enum fast path: plan-time pre-encoded JSON bytes per value.
+		// Skips Enum.Serialize (reflect + valuesLookup) and
+		// appendJSONString (no escaping needed for enum names by spec).
+		// Falls through to the Serialize path for ptr-to-value (handled
+		// by Serialize's reflect-Indirect) and for unknown values
+		// (Serialize returns nil → null or non-null error below).
+		if pre, ok := t.valueToJSON[result]; ok {
+			return append(dst, pre...)
 		}
 	}
 

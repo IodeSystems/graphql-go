@@ -21,6 +21,13 @@ func getVariableValues(
 	schema Schema,
 	definitionASTs []*ast.VariableDefinition,
 	inputs map[string]interface{}) (map[string]interface{}, error) {
+	// Fast path: no variable definitions on the operation. Skip the
+	// map alloc; downstream readers (populateArgumentValues, skip
+	// predicates, ResolveInfo.VariableValues consumers) all tolerate
+	// nil — Go map reads on nil return the zero value.
+	if len(definitionASTs) == 0 {
+		return nil, nil
+	}
 	values := map[string]interface{}{}
 	for _, defAST := range definitionASTs {
 		if defAST == nil || defAST.Variable == nil || defAST.Variable.Name == nil {

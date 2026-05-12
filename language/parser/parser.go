@@ -291,15 +291,26 @@ func parseVariableDefinitions(parser *Parser) ([]*ast.VariableDefinition, error)
 	if !peek(parser, lexer.PAREN_L) {
 		return variableDefinitions, nil
 	}
-	if vdefs, err := reverse(parser,
-		lexer.PAREN_L, parseVariableDefinition, lexer.PAREN_R,
-		true,
-	); err != nil {
+	openTok, err := expect(parser, lexer.PAREN_L)
+	if err != nil {
 		return variableDefinitions, err
-	} else {
-		for _, vdef := range vdefs {
-			variableDefinitions = append(variableDefinitions, vdef.(*ast.VariableDefinition))
+	}
+	for {
+		skp, err := skip(parser, lexer.PAREN_R)
+		if err != nil {
+			return variableDefinitions, err
 		}
+		if skp {
+			break
+		}
+		vdef, err := parseVariableDefinition(parser)
+		if err != nil {
+			return variableDefinitions, err
+		}
+		variableDefinitions = append(variableDefinitions, vdef)
+	}
+	if len(variableDefinitions) == 0 {
+		return variableDefinitions, unexpectedEmpty(parser, openTok.Start, lexer.PAREN_L, lexer.PAREN_R)
 	}
 	return variableDefinitions, nil
 }
@@ -307,7 +318,7 @@ func parseVariableDefinitions(parser *Parser) ([]*ast.VariableDefinition, error)
 /**
  * VariableDefinition : Variable : Type DefaultValue?
  */
-func parseVariableDefinition(parser *Parser) (interface{}, error) {
+func parseVariableDefinition(parser *Parser) (*ast.VariableDefinition, error) {
 	var (
 		variable *ast.Variable
 		ttype    ast.Type
@@ -459,17 +470,29 @@ func parseField(parser *Parser) (*ast.Field, error) {
  */
 func parseArguments(parser *Parser) ([]*ast.Argument, error) {
 	arguments := []*ast.Argument{}
-	if peek(parser, lexer.PAREN_L) {
-		if iArguments, err := reverse(parser,
-			lexer.PAREN_L, parseArgument, lexer.PAREN_R,
-			true,
-		); err != nil {
+	if !peek(parser, lexer.PAREN_L) {
+		return arguments, nil
+	}
+	openTok, err := expect(parser, lexer.PAREN_L)
+	if err != nil {
+		return arguments, err
+	}
+	for {
+		skp, err := skip(parser, lexer.PAREN_R)
+		if err != nil {
 			return arguments, err
-		} else {
-			for _, iArgument := range iArguments {
-				arguments = append(arguments, iArgument.(*ast.Argument))
-			}
 		}
+		if skp {
+			break
+		}
+		arg, err := parseArgument(parser)
+		if err != nil {
+			return arguments, err
+		}
+		arguments = append(arguments, arg)
+	}
+	if len(arguments) == 0 {
+		return arguments, unexpectedEmpty(parser, openTok.Start, lexer.PAREN_L, lexer.PAREN_R)
 	}
 	return arguments, nil
 }
@@ -477,7 +500,7 @@ func parseArguments(parser *Parser) ([]*ast.Argument, error) {
 /**
  * Argument : Name : Value
  */
-func parseArgument(parser *Parser) (interface{}, error) {
+func parseArgument(parser *Parser) (*ast.Argument, error) {
 	var (
 		err   error
 		name  *ast.Name
@@ -692,10 +715,6 @@ func parseConstValue(parser *Parser) (interface{}, error) {
 	return value, nil
 }
 
-func parseValueValue(parser *Parser) (interface{}, error) {
-	return parseValueLiteral(parser, false)
-}
-
 /**
  * ListValue[Const] :
  *   - [ ]
@@ -703,20 +722,23 @@ func parseValueValue(parser *Parser) (interface{}, error) {
  */
 func parseList(parser *Parser, isConst bool) (*ast.ListValue, error) {
 	start := parser.Token.Start
-	var item parseFn = parseValueValue
-	if isConst {
-		item = parseConstValue
+	if _, err := expect(parser, lexer.BRACKET_L); err != nil {
+		return nil, err
 	}
 	values := []ast.Value{}
-	if iValues, err := reverse(parser,
-		lexer.BRACKET_L, item, lexer.BRACKET_R,
-		false,
-	); err != nil {
-		return nil, err
-	} else {
-		for _, iValue := range iValues {
-			values = append(values, iValue.(ast.Value))
+	for {
+		skp, err := skip(parser, lexer.BRACKET_R)
+		if err != nil {
+			return nil, err
 		}
+		if skp {
+			break
+		}
+		v, err := parseValueLiteral(parser, isConst)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, v)
 	}
 	return ast.NewListValue(&ast.ListValue{
 		Values: values,

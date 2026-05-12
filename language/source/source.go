@@ -4,6 +4,10 @@ const (
 	name = "GraphQL"
 )
 
+// Source represents a GraphQL document for parsing.
+//
+// Body must not be mutated after Parse: token values (identifiers, numbers)
+// are zero-copy views into Body for performance.
 type Source struct {
 	Body []byte
 	Name string

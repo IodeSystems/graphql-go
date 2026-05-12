@@ -6,10 +6,22 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/graphql-go/graphql/gqlerrors"
 	"github.com/graphql-go/graphql/language/source"
 )
+
+// bytesAsString returns a string aliasing the given byte slice without copying.
+// The caller must guarantee the underlying bytes are not mutated for the
+// lifetime of the returned string. Used for token values that view into
+// source.Source.Body, which is documented as immutable post-parse.
+func bytesAsString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(&b[0], len(b))
+}
 
 type TokenKind int
 
@@ -91,13 +103,17 @@ type Token struct {
 
 type Lexer func(resetPosition int) (Token, error)
 
+// Lex returns a stateful lexer closure for the given source.
+//
+// Deprecated: prefer ReadToken, which avoids the per-source closure allocation
+// and the indirect call per token. Lex is preserved for backwards compatibility.
 func Lex(s *source.Source) Lexer {
 	var prevPosition int
 	return func(resetPosition int) (Token, error) {
 		if resetPosition == 0 {
 			resetPosition = prevPosition
 		}
-		token, err := readToken(s, resetPosition)
+		token, err := ReadToken(s, resetPosition)
 		if err != nil {
 			return token, err
 		}
@@ -106,30 +122,31 @@ func Lex(s *source.Source) Lexer {
 	}
 }
 
+// ReadToken lexes a single token starting at fromPosition.
+func ReadToken(s *source.Source, fromPosition int) (Token, error) {
+	return readToken(s, fromPosition)
+}
+
 // Reads an alphanumeric + underscore name from the source.
 // [_A-Za-z][_0-9A-Za-z]*
 // position: Points to the byte position in the byte array
-// runePosition: Points to the rune position in the byte array
+// runePosition: Points to the rune position in the byte array (unused; name chars are ASCII-only)
 func readName(source *source.Source, position, runePosition int) Token {
 	body := source.Body
 	bodyLength := len(body)
 	endByte := position + 1
-	endRune := runePosition + 1
-	for {
-		code, _ := runeAt(body, endByte)
-		if (endByte != bodyLength) &&
-			(code == '_' || // _
-				code >= '0' && code <= '9' || // 0-9
-				code >= 'A' && code <= 'Z' || // A-Z
-				code >= 'a' && code <= 'z') { // a-z
+	for endByte < bodyLength {
+		c := body[endByte]
+		if c == '_' ||
+			(c >= '0' && c <= '9') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') {
 			endByte++
-			endRune++
 			continue
-		} else {
-			break
 		}
+		break
 	}
-	return makeToken(NAME, position, endByte, string(body[position:endByte]))
+	return makeToken(NAME, position, endByte, bytesAsString(body[position:endByte]))
 }
 
 // Reads a number token from the source file, either a float
@@ -190,7 +207,7 @@ func readNumber(s *source.Source, start int, firstCode rune, codeLength int) (To
 		kind = FLOAT
 	}
 
-	return makeToken(kind, start, position, string(body[start:position])), nil
+	return makeToken(kind, start, position, bytesAsString(body[start:position])), nil
 }
 
 // Returns the new position in the source after reading digits.
@@ -593,51 +610,51 @@ func runeAt(body []byte, position int) (code rune, charWidth int) {
 
 // Reads from body starting at startPosition until it finds a non-whitespace
 // or commented character, then returns the position of that character for lexing.
-// lexing.
-// Returns both byte positions and rune position
+// Returns both byte positions and rune position.
 func positionAfterWhitespace(body []byte, startPosition int) (position int, runePosition int) {
 	bodyLength := len(body)
 	position = startPosition
 	runePosition = startPosition
-	for {
-		if position < bodyLength {
-			code, n := runeAt(body, position)
-
-			// Skip Ignored
-			if code == 0xFEFF || // BOM
-				// White Space
-				code == 0x0009 || // tab
-				code == 0x0020 || // space
-				// Line Terminator
-				code == 0x000A || // new line
-				code == 0x000D || // carriage return
-				// Comma
-				code == 0x002C {
-				position += n
+	for position < bodyLength {
+		c := body[position]
+		// ASCII fast path: tab/space/LF/CR/comma are the only ignored ASCII chars
+		// (besides the comment introducer '#').
+		if c < 0x80 {
+			if c == 0x09 || c == 0x20 || c == 0x0A || c == 0x0D || c == 0x2C {
+				position++
 				runePosition++
-			} else if code == 35 { // #
-				position += n
+				continue
+			}
+			if c == '#' {
+				position++
 				runePosition++
-				for {
-					code, n := runeAt(body, position)
-					if position < bodyLength &&
-						code != 0 &&
-						// SourceCharacter but not LineTerminator
-						(code > 0x001F || code == 0x0009) && code != 0x000A && code != 0x000D {
-						position += n
+				for position < bodyLength {
+					c2 := body[position]
+					if c2 < 0x80 {
+						// Stop on LineTerminator or invalid control char.
+						if c2 == 0x0A || c2 == 0x0D || (c2 < 0x20 && c2 != 0x09) {
+							break
+						}
+						position++
 						runePosition++
 						continue
-					} else {
-						break
 					}
+					_, n := runeAt(body, position)
+					position += n
+					runePosition++
 				}
-			} else {
-				break
+				continue
 			}
-			continue
-		} else {
 			break
 		}
+		// Non-ASCII: only BOM (U+FEFF) is ignored.
+		code, n := runeAt(body, position)
+		if code == 0xFEFF {
+			position += n
+			runePosition++
+			continue
+		}
+		break
 	}
 	return position, runePosition
 }

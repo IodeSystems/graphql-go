@@ -236,13 +236,19 @@ summary_table() {
             if (v < 1)    return sprintf("%.2fms", v*1000)
             return sprintf("%.2fs", v)
         }
+        # Render base/val as a multiplier. >1x = faster than base, <1x = slower.
+        function fmt_mult(m) {
+            if (m >= 100) return sprintf("%.0fx", m)
+            if (m >= 10)  return sprintf("%.1fx", m)
+            return sprintf("%.2fx", m)
+        }
         $2 == "sec/op" { in_section = 1; next }
         $2 == "B/op" || $2 == "allocs/op" { in_section = 0; next }
         /^,/ { next }
         in_section && $1 != "" {
             is_geo = ($1 == "geomean")
             if (!printed) {
-                print "**" title " — sec/op**"
+                print "**" title " — sec/op (× = base/val; >1× faster)**"
                 print ""
                 row = "| Benchmark"
                 sep = "|---"
@@ -255,19 +261,24 @@ summary_table() {
                 printed = 1
             }
             row = is_geo ? "| **" $1 "**" : "| " $1
+            base_val = $2 + 0
             for (i = 1; i <= n_labels; i++) {
                 if (i == 1) {
-                    cell = fmt($2)
+                    cell = (base_val == 0) ? fmt($2) : fmt($2) " (1.00x)"
                 } else {
                     # CSV layout per added file: val, ci, vs base, P
                     # Field offsets: val_i = 4*i - 4, delta_i = 4*i - 2
                     vfield = 4 * i - 4
                     dfield = 4 * i - 2
                     delta = $dfield
-                    if (delta == "" || delta == "~") {
+                    val = $vfield + 0
+                    if (val == 0 || base_val == 0) {
+                        # No measurement, or no base to compare to.
                         cell = fmt($vfield)
+                    } else if (delta == "" || delta == "~") {
+                        cell = fmt($vfield) " (~)"
                     } else {
-                        cell = fmt($vfield) " (" delta ")"
+                        cell = fmt($vfield) " (" fmt_mult(base_val / val) ")"
                     }
                 }
                 if (is_geo) cell = "**" cell "**"

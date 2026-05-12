@@ -5,6 +5,7 @@ import (
 
 	"github.com/graphql-go/graphql/gqlerrors"
 	"github.com/graphql-go/graphql/language/ast"
+	"github.com/graphql-go/graphql/language/kinds"
 	"github.com/graphql-go/graphql/language/lexer"
 	"github.com/graphql-go/graphql/language/source"
 )
@@ -46,12 +47,29 @@ type ParseParams struct {
 }
 
 type Parser struct {
-	LexToken lexer.Lexer
-	Source   *source.Source
-	Options  ParseOptions
-	PrevEnd  int
-	Token    lexer.Token
+	Source  *source.Source
+	Options ParseOptions
+	PrevEnd int
+	Token   lexer.Token
+
+	// Slab-allocated AST nodes: pages amortize per-node heap allocations.
+	// Page sizes grow geometrically (init -> max) to keep small parses cheap.
+	locPage   []ast.Location
+	locIdx    int
+	namePage  []ast.Name
+	nameIdx   int
+	fieldPage []ast.Field
+	fieldIdx  int
 }
+
+const (
+	locPageInitSize   = 16
+	locPageMaxSize    = 256
+	namePageInitSize  = 16
+	namePageMaxSize   = 256
+	fieldPageInitSize = 8
+	fieldPageMaxSize  = 128
+)
 
 func Parse(p ParseParams) (*ast.Document, error) {
 	var sourceObj *source.Source
@@ -101,24 +119,55 @@ func parseName(parser *Parser) (*ast.Name, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ast.NewName(&ast.Name{
-		Value: token.Value,
-		Loc:   loc(parser, token.Start),
-	}), nil
+	n := parser.allocName()
+	n.Kind = kinds.Name
+	n.Value = token.Value
+	n.Loc = loc(parser, token.Start)
+	return n, nil
+}
+
+func (p *Parser) allocName() *ast.Name {
+	if p.nameIdx == len(p.namePage) {
+		next := len(p.namePage) * 2
+		if next < namePageInitSize {
+			next = namePageInitSize
+		} else if next > namePageMaxSize {
+			next = namePageMaxSize
+		}
+		p.namePage = make([]ast.Name, next)
+		p.nameIdx = 0
+	}
+	n := &p.namePage[p.nameIdx]
+	p.nameIdx++
+	return n
+}
+
+func (p *Parser) allocField() *ast.Field {
+	if p.fieldIdx == len(p.fieldPage) {
+		next := len(p.fieldPage) * 2
+		if next < fieldPageInitSize {
+			next = fieldPageInitSize
+		} else if next > fieldPageMaxSize {
+			next = fieldPageMaxSize
+		}
+		p.fieldPage = make([]ast.Field, next)
+		p.fieldIdx = 0
+	}
+	f := &p.fieldPage[p.fieldIdx]
+	p.fieldIdx++
+	return f
 }
 
 func makeParser(s *source.Source, opts ParseOptions) (*Parser, error) {
-	lexToken := lexer.Lex(s)
-	token, err := lexToken(0)
+	token, err := lexer.ReadToken(s, 0)
 	if err != nil {
 		return &Parser{}, err
 	}
 	return &Parser{
-		LexToken: lexToken,
-		Source:   s,
-		Options:  opts,
-		PrevEnd:  0,
-		Token:    token,
+		Source:  s,
+		Options: opts,
+		PrevEnd: 0,
+		Token:   token,
 	}, nil
 }
 
@@ -316,18 +365,28 @@ func parseVariable(parser *Parser) (*ast.Variable, error) {
  */
 func parseSelectionSet(parser *Parser) (*ast.SelectionSet, error) {
 	start := parser.Token.Start
-	selections := []ast.Selection{}
-	if iSelections, err := reverse(parser,
-		lexer.BRACE_L, parseSelection, lexer.BRACE_R,
-		true,
-	); err != nil {
+	openTok, err := expect(parser, lexer.BRACE_L)
+	if err != nil {
 		return nil, err
-	} else {
-		for _, iSelection := range iSelections {
-			selections = append(selections, iSelection.(ast.Selection))
-		}
 	}
-
+	var selections []ast.Selection
+	for {
+		skp, err := skip(parser, lexer.BRACE_R)
+		if err != nil {
+			return nil, err
+		}
+		if skp {
+			break
+		}
+		sel, err := parseSelection(parser)
+		if err != nil {
+			return nil, err
+		}
+		selections = append(selections, sel)
+	}
+	if len(selections) == 0 {
+		return nil, unexpectedEmpty(parser, openTok.Start, lexer.BRACE_L, lexer.BRACE_R)
+	}
 	return ast.NewSelectionSet(&ast.SelectionSet{
 		Selections: selections,
 		Loc:        loc(parser, start),
@@ -340,7 +399,7 @@ func parseSelectionSet(parser *Parser) (*ast.SelectionSet, error) {
  *   - FragmentSpread
  *   - InlineFragment
  */
-func parseSelection(parser *Parser) (interface{}, error) {
+func parseSelection(parser *Parser) (ast.Selection, error) {
 	if peek(parser, lexer.SPREAD) {
 		return parseFragment(parser)
 	}
@@ -384,14 +443,15 @@ func parseField(parser *Parser) (*ast.Field, error) {
 			return nil, err
 		}
 	}
-	return ast.NewField(&ast.Field{
-		Alias:        alias,
-		Name:         name,
-		Arguments:    arguments,
-		Directives:   directives,
-		SelectionSet: selectionSet,
-		Loc:          loc(parser, start),
-	}), nil
+	f := parser.allocField()
+	f.Kind = kinds.Field
+	f.Alias = alias
+	f.Name = name
+	f.Arguments = arguments
+	f.Directives = directives
+	f.SelectionSet = selectionSet
+	f.Loc = loc(parser, start)
+	return f, nil
 }
 
 /**
@@ -449,7 +509,7 @@ func parseArgument(parser *Parser) (interface{}, error) {
  *
  * InlineFragment : ... TypeCondition? Directives? SelectionSet
  */
-func parseFragment(parser *Parser) (interface{}, error) {
+func parseFragment(parser *Parser) (ast.Selection, error) {
 	var (
 		err error
 	)
@@ -1481,23 +1541,30 @@ func loc(parser *Parser, start int) *ast.Location {
 	if parser.Options.NoLocation {
 		return nil
 	}
-	if parser.Options.NoSource {
-		return ast.NewLocation(&ast.Location{
-			Start: start,
-			End:   parser.PrevEnd,
-		})
+	if parser.locIdx == len(parser.locPage) {
+		next := len(parser.locPage) * 2
+		if next < locPageInitSize {
+			next = locPageInitSize
+		} else if next > locPageMaxSize {
+			next = locPageMaxSize
+		}
+		parser.locPage = make([]ast.Location, next)
+		parser.locIdx = 0
 	}
-	return ast.NewLocation(&ast.Location{
-		Start:  start,
-		End:    parser.PrevEnd,
-		Source: parser.Source,
-	})
+	l := &parser.locPage[parser.locIdx]
+	parser.locIdx++
+	l.Start = start
+	l.End = parser.PrevEnd
+	if !parser.Options.NoSource {
+		l.Source = parser.Source
+	}
+	return l
 }
 
 // Moves the internal parser object to the next lexed token.
 func advance(parser *Parser) error {
 	parser.PrevEnd = parser.Token.End
-	token, err := parser.LexToken(parser.PrevEnd)
+	token, err := lexer.ReadToken(parser.Source, parser.PrevEnd)
 	if err != nil {
 		return err
 	}
@@ -1507,7 +1574,7 @@ func advance(parser *Parser) error {
 
 // lookahead retrieves the next token
 func lookahead(parser *Parser) (lexer.Token, error) {
-	return parser.LexToken(parser.Token.End)
+	return lexer.ReadToken(parser.Source, parser.Token.End)
 }
 
 // Determines if the next token is of a given kind

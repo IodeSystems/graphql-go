@@ -3,11 +3,11 @@ package parser
 import (
 	"fmt"
 
-	"github.com/graphql-go/graphql/gqlerrors"
-	"github.com/graphql-go/graphql/language/ast"
-	"github.com/graphql-go/graphql/language/kinds"
-	"github.com/graphql-go/graphql/language/lexer"
-	"github.com/graphql-go/graphql/language/source"
+	"github.com/IodeSystems/graphql-go/gqlerrors"
+	"github.com/IodeSystems/graphql-go/language/ast"
+	"github.com/IodeSystems/graphql-go/language/kinds"
+	"github.com/IodeSystems/graphql-go/language/lexer"
+	"github.com/IodeSystems/graphql-go/language/source"
 )
 
 type parseFn func(parser *Parser) (interface{}, error)

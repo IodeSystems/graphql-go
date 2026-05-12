@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/graphql-go/graphql"
-	"github.com/graphql-go/graphql/gqlerrors"
-	"github.com/graphql-go/graphql/language/location"
-	"github.com/graphql-go/graphql/testutil"
+	"github.com/IodeSystems/graphql-go"
+	"github.com/IodeSystems/graphql-go/gqlerrors"
+	"github.com/IodeSystems/graphql-go/language/location"
+	"github.com/IodeSystems/graphql-go/testutil"
 )
 
 func TestExecutesArbitraryCode(t *testing.T) {
@@ -2415,7 +2415,7 @@ func TestQuery_OriginalErrorPanic(t *testing.T) {
 	}
 }
 
-// Regression test for https://github.com/graphql-go/graphql/issues/700
+// Regression test for https://github.com/IodeSystems/graphql-go/issues/700
 // DefaultResolveFn should work with maps that have custom string-based key types.
 func TestDefaultResolveFn_MapWithCustomStringKeyType(t *testing.T) {
 	type TranslationKey string

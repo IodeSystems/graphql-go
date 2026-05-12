@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/graphql-go/graphql"
-	"github.com/graphql-go/graphql/benchutil"
+	"github.com/IodeSystems/graphql-go"
+	"github.com/IodeSystems/graphql-go/benchutil"
 )
 
 // TestPlanCacheBasicHits exercises the un-normalized path: identical

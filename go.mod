@@ -1,3 +1,3 @@
-module github.com/graphql-go/graphql
+module github.com/IodeSystems/graphql-go
 
 go 1.21

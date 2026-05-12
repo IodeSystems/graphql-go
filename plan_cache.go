@@ -7,9 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/graphql-go/graphql/gqlerrors"
-	"github.com/graphql-go/graphql/language/parser"
-	"github.com/graphql-go/graphql/language/source"
+	"github.com/IodeSystems/graphql-go/gqlerrors"
+	"github.com/IodeSystems/graphql-go/language/parser"
+	"github.com/IodeSystems/graphql-go/language/source"
 )
 
 // PlanCache is a bounded, schema-aware LRU of parsed + validated +

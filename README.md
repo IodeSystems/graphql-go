@@ -1,12 +1,22 @@
-# graphql [![CircleCI](https://circleci.com/gh/graphql-go/graphql/tree/master.svg?style=svg)](https://circleci.com/gh/graphql-go/graphql/tree/master) [![Go Reference](https://pkg.go.dev/badge/github.com/graphql-go/graphql.svg)](https://pkg.go.dev/github.com/graphql-go/graphql) [![Coverage Status](https://coveralls.io/repos/github/graphql-go/graphql/badge.svg?branch=master)](https://coveralls.io/github/graphql-go/graphql?branch=master) [![Join the chat at https://gitter.im/graphql-go/graphql](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/graphql-go/graphql?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+# graphql-go [![Go Reference](https://pkg.go.dev/badge/github.com/IodeSystems/graphql-go.svg)](https://pkg.go.dev/github.com/IodeSystems/graphql-go)
 
 An implementation of GraphQL in Go. Follows the official reference implementation [`graphql-js`](https://github.com/graphql/graphql-js).
 
 Supports: queries, mutations & subscriptions.
 
+### About this fork
+
+This is the [IodeSystems](https://github.com/IodeSystems) fork of [`graphql-go/graphql`](https://github.com/graphql-go/graphql). Drop-in replacement at the package level (no API removals) that adds:
+
+- **Query plan caching** (`PlanQuery` + `ExecutePlan`) — parse/validate/plan once, execute many.
+- **Resolver-side append API** (`Field.ResolveAppend`) — opt-in zero-boxing JSON emission.
+- **Substantial parser and executor perf work** — see the Performance section below.
+
+All optimizations are default-on (opt-out via `ExecuteParams` flags where behaviorally relevant). The append API is opt-in because it requires schema-author changes; everything else applies transparently. Upstream PRs may stagnate; this fork ships independently while remaining merge-friendly.
+
 ### Documentation
 
-godoc: https://pkg.go.dev/github.com/graphql-go/graphql
+godoc: https://pkg.go.dev/github.com/IodeSystems/graphql-go
 
 ### Performance
 
@@ -140,7 +150,7 @@ Friendly reminder links are available in case you would like to contribute back 
 
 To install the library, run:
 ```bash
-go get github.com/graphql-go/graphql
+go get github.com/IodeSystems/graphql-go
 ```
 
 The following is a simple example which defines a schema with a single `hello` string-type field and a `Resolve` method which returns the string `world`. A GraphQL query is performed against this schema with the resulting output printed in JSON format.
@@ -153,7 +163,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/graphql-go/graphql"
+	"github.com/IodeSystems/graphql-go"
 )
 
 func main() {
@@ -188,7 +198,7 @@ func main() {
 	fmt.Printf("%s \n", rJSON) // {"data":{"hello":"world"}}
 }
 ```
-For more complex examples, refer to the [examples/](https://github.com/graphql-go/graphql/tree/master/examples/) directory and [graphql_test.go](https://github.com/graphql-go/graphql/blob/master/graphql_test.go).
+For more complex examples, refer to the [examples/](https://github.com/IodeSystems/graphql-go/tree/main/examples/) directory and [graphql_test.go](https://github.com/IodeSystems/graphql-go/blob/main/graphql_test.go).
 
 ### Third Party Libraries
 | Name          | Author        | Description  |

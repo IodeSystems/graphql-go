@@ -8,8 +8,8 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
-	"github.com/graphql-go/graphql/gqlerrors"
-	"github.com/graphql-go/graphql/language/source"
+	"github.com/IodeSystems/graphql-go/gqlerrors"
+	"github.com/IodeSystems/graphql-go/language/source"
 )
 
 // bytesAsString returns a string aliasing the given byte slice without copying.

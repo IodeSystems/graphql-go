@@ -127,6 +127,16 @@ elif has_parse_bench "$WT_A" || has_parse_bench "$WT_B"; then
     err "copied parser_bench_test.go from $SRC into $DST (module: $SRC_MOD -> $DST_MOD)"
 fi
 
+# normalize_pkg rewrites the "pkg:" line in a benchmark output file to a
+# module-agnostic form so benchstat can pair results across forks with
+# different module paths. E.g.:
+#   pkg: github.com/IodeSystems/graphql-go/language/parser
+# becomes:
+#   pkg: language/parser
+normalize_pkg() {
+    sed -i -E 's|^pkg: .*/([^/]+)$|pkg: \1|' "$1"
+}
+
 run_bench() {
     local dir=$1 pat=$2 pkg=$3 out=$4
     err "  $pat ($pkg) in $(basename "$dir")"
@@ -151,6 +161,9 @@ if [ "$PARSE_OK" = "1" ]; then
     run_bench "$WT_A" "$PARSE_PATTERN" "./language/parser/" "$PARSE_OUT_A"
     err "==> parse benchmarks ($SHORT_B)"
     run_bench "$WT_B" "$PARSE_PATTERN" "./language/parser/" "$PARSE_OUT_B"
+    # Normalize pkg: lines so benchstat can pair across module paths.
+    normalize_pkg "$PARSE_OUT_A"
+    normalize_pkg "$PARSE_OUT_B"
 fi
 
 # Strip the variant prefix so a per-tier benchstat run pairs benchmarks
@@ -180,6 +193,9 @@ if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
     run_bench "$WT_A" "$PLAN_AB_PATTERN" "./" "$PLAN_OUT_A"
     err "==> plan benchmarks ($SHORT_B)"
     run_bench "$WT_B" "$PLAN_AB_PATTERN" "./" "$PLAN_OUT_B"
+    # Normalize pkg: lines so benchstat can pair across module paths.
+    normalize_pkg "$PLAN_OUT_A"
+    normalize_pkg "$PLAN_OUT_B"
 elif [ "$PLAN_A" = "1" ]; then
     run_solo_tiers "$SHORT_A" "$WT_A" \
         "$PLAN_SOLO_UNCACHED_A" "$PLAN_SOLO_PLANNED_A" \

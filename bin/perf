@@ -3,13 +3,22 @@
 # bin/perf — compare benchmark performance between two git refs.
 #
 # Uses git worktrees so the working tree is never disturbed. Auto-detects
-# query-plan support (presence of plan_bench_test.go) in each ref and runs
-# planner benchmarks only when both refs support them.
+# query-plan support (presence of plan_bench_test.go) per ref.
+#
+#   - both refs support plan: A vs B comparison on planned + plan-cache benches
+#   - one ref supports plan: 4-tier comparison on the supporting ref
+#       (uncached → planned → +append → +append-eager)
+#       Frames the case for the non-supporting ref to adopt plan support.
+#   - neither: plan section is skipped.
 #
 # Usage:
 #   bin/perf                              # upstream/master vs HEAD
 #   bin/perf <ref-a> <ref-b>              # explicit refs
 #   bin/perf <ref-a> <ref-b> --no-readme  # skip README update; print to stdout
+#
+# Environment:
+#   PERF_COUNT      benchmark iterations per bench (default: 6)
+#   PERF_BENCHTIME  per-iteration time budget (default: 2s)
 #
 # Requires: go, git, benchstat (auto-installed if missing).
 
@@ -23,10 +32,12 @@ UPDATE_README=1
 PARSE_PATTERN='^BenchmarkParse_'
 # When both refs support query plan, compare A vs B on planned + cache benches.
 PLAN_AB_PATTERN='^BenchmarkPlanned|^BenchmarkPlanCache_'
-# When only one ref supports query plan, render that ref's planned-vs-uncached
-# delta as the case for adoption.
-PLAN_ONLY_PLANNED='^BenchmarkPlannedExecute_'
+# When only one ref supports query plan, the four execution tiers run
+# independently and pair by suffix after prefix-stripping.
 PLAN_ONLY_UNCACHED='^BenchmarkUncachedExecute_'
+PLAN_ONLY_PLANNED='^BenchmarkPlannedExecute_'
+PLAN_ONLY_APPEND='^BenchmarkPlannedAppend_[^E]'        # excludes PlannedAppendEager_
+PLAN_ONLY_APPEND_EAGER='^BenchmarkPlannedAppendEager_'
 COUNT="${PERF_COUNT:-6}"
 BENCHTIME="${PERF_BENCHTIME:-2s}"
 
@@ -35,13 +46,11 @@ cd "$REPO_ROOT"
 
 err() { echo "perf: $*" >&2; }
 
-# Resolve refs.
 SHA_A=$(git rev-parse --verify "$REF_A" 2>/dev/null) || { err "unknown ref: $REF_A"; exit 1; }
 SHA_B=$(git rev-parse --verify "$REF_B" 2>/dev/null) || { err "unknown ref: $REF_B"; exit 1; }
 SHORT_A=$(git rev-parse --short "$SHA_A")
 SHORT_B=$(git rev-parse --short "$SHA_B")
 
-# benchstat — install if missing.
 if ! command -v benchstat >/dev/null; then
     err "installing benchstat..."
     go install golang.org/x/perf/cmd/benchstat@latest
@@ -96,11 +105,15 @@ PARSE_OUT_A="$TMP/${SHORT_A}-parse.txt"
 PARSE_OUT_B="$TMP/${SHORT_B}-parse.txt"
 PLAN_OUT_A="$TMP/${SHORT_A}-plan.txt"
 PLAN_OUT_B="$TMP/${SHORT_B}-plan.txt"
-# Used when only one ref supports plan: planned vs uncached on the supporting ref.
-PLAN_SOLO_PLANNED_A="$TMP/${SHORT_A}-planned.txt"
+# Solo path: per-tier files (uncached/planned/append/eager) on each supporting ref.
 PLAN_SOLO_UNCACHED_A="$TMP/${SHORT_A}-uncached.txt"
-PLAN_SOLO_PLANNED_B="$TMP/${SHORT_B}-planned.txt"
+PLAN_SOLO_PLANNED_A="$TMP/${SHORT_A}-planned.txt"
+PLAN_SOLO_APPEND_A="$TMP/${SHORT_A}-append.txt"
+PLAN_SOLO_APPEND_EAGER_A="$TMP/${SHORT_A}-append-eager.txt"
 PLAN_SOLO_UNCACHED_B="$TMP/${SHORT_B}-uncached.txt"
+PLAN_SOLO_PLANNED_B="$TMP/${SHORT_B}-planned.txt"
+PLAN_SOLO_APPEND_B="$TMP/${SHORT_B}-append.txt"
+PLAN_SOLO_APPEND_EAGER_B="$TMP/${SHORT_B}-append-eager.txt"
 
 if [ "$PARSE_OK" = "1" ]; then
     err "==> parse benchmarks ($SHORT_A)"
@@ -109,13 +122,30 @@ if [ "$PARSE_OK" = "1" ]; then
     run_bench "$WT_B" "$PARSE_PATTERN" "./language/parser/" "$PARSE_OUT_B"
 fi
 
-# Strip the Planned/Uncached prefix so a single-ref planned-vs-uncached
-# benchstat can pair benchmarks by their shared suffix.
+# Strip the variant prefix so a per-tier benchstat run pairs benchmarks
+# by their shared suffix. Order matters: PlannedAppendEager_ must be
+# rewritten before PlannedAppend_ because the latter is a substring prefix.
 strip_plan_prefix() {
     sed -i \
+        -e 's/PlannedAppendEager_/Execute_/g' \
+        -e 's/PlannedAppend_/Execute_/g' \
         -e 's/PlannedExecute_/Execute_/g' \
         -e 's/UncachedExecute_/Execute_/g' \
         "$1"
+}
+
+run_solo_tiers() {
+    local short=$1 wt=$2
+    local uncached=$3 planned=$4 append=$5 eager=$6
+    err "==> per-tier benchmarks ($short) — solo (other ref lacks plan)"
+    run_bench "$wt" "$PLAN_ONLY_UNCACHED"     "./" "$uncached"
+    run_bench "$wt" "$PLAN_ONLY_PLANNED"      "./" "$planned"
+    run_bench "$wt" "$PLAN_ONLY_APPEND"       "./" "$append"
+    run_bench "$wt" "$PLAN_ONLY_APPEND_EAGER" "./" "$eager"
+    strip_plan_prefix "$uncached"
+    strip_plan_prefix "$planned"
+    strip_plan_prefix "$append"
+    strip_plan_prefix "$eager"
 }
 
 if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
@@ -123,75 +153,118 @@ if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
     run_bench "$WT_A" "$PLAN_AB_PATTERN" "./" "$PLAN_OUT_A"
     err "==> plan benchmarks ($SHORT_B)"
     run_bench "$WT_B" "$PLAN_AB_PATTERN" "./" "$PLAN_OUT_B"
-elif [ "$PLAN_A" = "1" ] || [ "$PLAN_B" = "1" ]; then
-    # Solo path: render planned-vs-uncached delta on the supporting ref.
-    if [ "$PLAN_A" = "1" ]; then
-        err "==> planned vs uncached ($SHORT_A) — solo (other ref lacks plan)"
-        run_bench "$WT_A" "$PLAN_ONLY_PLANNED" "./" "$PLAN_SOLO_PLANNED_A"
-        run_bench "$WT_A" "$PLAN_ONLY_UNCACHED" "./" "$PLAN_SOLO_UNCACHED_A"
-        strip_plan_prefix "$PLAN_SOLO_PLANNED_A"
-        strip_plan_prefix "$PLAN_SOLO_UNCACHED_A"
-    fi
-    if [ "$PLAN_B" = "1" ]; then
-        err "==> planned vs uncached ($SHORT_B) — solo (other ref lacks plan)"
-        run_bench "$WT_B" "$PLAN_ONLY_PLANNED" "./" "$PLAN_SOLO_PLANNED_B"
-        run_bench "$WT_B" "$PLAN_ONLY_UNCACHED" "./" "$PLAN_SOLO_UNCACHED_B"
-        strip_plan_prefix "$PLAN_SOLO_PLANNED_B"
-        strip_plan_prefix "$PLAN_SOLO_UNCACHED_B"
-    fi
+elif [ "$PLAN_A" = "1" ]; then
+    run_solo_tiers "$SHORT_A" "$WT_A" \
+        "$PLAN_SOLO_UNCACHED_A" "$PLAN_SOLO_PLANNED_A" \
+        "$PLAN_SOLO_APPEND_A" "$PLAN_SOLO_APPEND_EAGER_A"
+elif [ "$PLAN_B" = "1" ]; then
+    run_solo_tiers "$SHORT_B" "$WT_B" \
+        "$PLAN_SOLO_UNCACHED_B" "$PLAN_SOLO_PLANNED_B" \
+        "$PLAN_SOLO_APPEND_B" "$PLAN_SOLO_APPEND_EAGER_B"
 fi
 
-# Summary table extractor: pulls each benchmark's sec/op delta out of
-# benchstat's CSV output and emits a markdown table row.
+# summary_table renders an N-column markdown table from benchstat's CSV
+# output. Args: title label1 file1 label2 file2 [label3 file3 ...].
+# Cells after the first column include the inline "vs base" delta.
 summary_table() {
-    local title=$1 col_a=$2 col_b=$3 a=$4 b=$5
-    # Run benchstat from the file's directory so column headers are basenames,
-    # not absolute temp paths.
+    local title=$1
+    shift
+    local labels=() files=()
+    while [ $# -ge 2 ]; do
+        labels+=("$1")
+        files+=("$2")
+        shift 2
+    done
+    local n=${#files[@]}
     local dir
-    dir=$(dirname "$a")
-    (cd "$dir" && benchstat -format csv "$(basename "$a")" "$(basename "$b")" 2>/dev/null) | \
-    awk -v title="$title" -v col_a="$col_a" -v col_b="$col_b" '
-        BEGIN { FS=","; printed=0 }
-        # Section header rows have the metric in column 2 (e.g. "sec/op").
-        # We only want sec/op deltas in the summary.
+    dir=$(dirname "${files[0]}")
+    local basenames=()
+    local f
+    for f in "${files[@]}"; do basenames+=("$(basename "$f")"); done
+
+    (cd "$dir" && benchstat -format csv "${basenames[@]}" 2>/dev/null) | \
+    awk -v title="$title" -v labels_str="${labels[*]}" '
+        BEGIN { FS=","; n_labels = split(labels_str, lbl, " ") }
+        function fmt(s,    v) {
+            v = s + 0
+            if (v == 0) return s
+            if (v < 1e-6) return sprintf("%.0fns", v*1e9)
+            if (v < 1e-3) return sprintf("%.2fµs", v*1e6)
+            if (v < 1)    return sprintf("%.2fms", v*1000)
+            return sprintf("%.2fs", v)
+        }
         $2 == "sec/op" { in_section = 1; next }
         $2 == "B/op" || $2 == "allocs/op" { in_section = 0; next }
-        /^,/ { next }                      # other header / blank-ish
-        in_section && $1 != "" && $1 != "geomean" && $6 != "" {
+        /^,/ { next }
+        in_section && $1 != "" {
+            is_geo = ($1 == "geomean")
             if (!printed) {
                 print "**" title " — sec/op**"
                 print ""
-                printf "| Benchmark | %s | %s | Δ |\n", col_a, col_b
-                print "|---|---:|---:|---:|"
+                row = "| Benchmark"
+                sep = "|---"
+                for (i = 1; i <= n_labels; i++) {
+                    row = row " | " lbl[i]
+                    sep = sep "|---:"
+                }
+                print row " |"
+                print sep "|"
                 printed = 1
             }
-            printf "| %s | %s | %s | %s |\n", $1, fmt($2), fmt($4), $6
-        }
-        in_section && $1 == "geomean" {
-            printf "| **geomean** | **%s** | **%s** | **%s** |\n", fmt($2), fmt($4), $6
-        }
-        function fmt(v,    n) {
-            n = v + 0
-            if (n == 0) return v
-            if (n < 1e-6) return sprintf("%.0fns", n*1e9)
-            if (n < 1e-3) return sprintf("%.2fµs", n*1e6)
-            if (n < 1)    return sprintf("%.2fms", n*1000)
-            return sprintf("%.2fs", n)
+            row = is_geo ? "| **" $1 "**" : "| " $1
+            for (i = 1; i <= n_labels; i++) {
+                if (i == 1) {
+                    cell = fmt($2)
+                } else {
+                    # CSV layout per added file: val, ci, vs base, P
+                    # Field offsets: val_i = 4*i - 4, delta_i = 4*i - 2
+                    vfield = 4 * i - 4
+                    dfield = 4 * i - 2
+                    delta = $dfield
+                    if (delta == "" || delta == "~") {
+                        cell = fmt($vfield)
+                    } else {
+                        cell = fmt($vfield) " (" delta ")"
+                    }
+                }
+                if (is_geo) cell = "**" cell "**"
+                row = row " | " cell
+            }
+            print row " |"
         }
     '
 }
 
+# emit_section: same arg shape as summary_table, plus a leading hint string.
+# Args: title hint label1 file1 label2 file2 ...
 emit_section() {
-    local title=$1 col_a=$2 col_b=$3 a=$4 b=$5 hint=$6
-    if [ ! -s "$a" ] || [ ! -s "$b" ]; then
-        printf "**%s**\n\n_Not run: %s_\n\n" "$title" "$hint"
-        return
-    fi
-    summary_table "$title" "$col_a" "$col_b" "$a" "$b"
+    local title=$1 hint=$2
+    shift 2
+    local labels=() files=()
+    while [ $# -ge 2 ]; do
+        labels+=("$1")
+        files+=("$2")
+        shift 2
+    done
+    local f
+    for f in "${files[@]}"; do
+        if [ ! -s "$f" ]; then
+            printf "**%s**\n\n_Not run: %s_\n\n" "$title" "$hint"
+            return
+        fi
+    done
+    local args=()
+    local i
+    for ((i=0; i<${#labels[@]}; i++)); do
+        args+=("${labels[$i]}" "${files[$i]}")
+    done
+    summary_table "$title" "${args[@]}"
     local dir
-    dir=$(dirname "$a")
+    dir=$(dirname "${files[0]}")
+    local basenames=()
+    for f in "${files[@]}"; do basenames+=("$(basename "$f")"); done
     printf "\n<details>\n<summary>Full benchstat output</summary>\n\n\`\`\`\n"
-    (cd "$dir" && benchstat "$(basename "$a")" "$(basename "$b")" 2>/dev/null)
+    (cd "$dir" && benchstat "${basenames[@]}" 2>/dev/null)
     printf "\`\`\`\n\n</details>\n\n"
 }
 
@@ -202,21 +275,41 @@ TABLE=$(mktemp)
         "$DATE" "$REF_A" "$SHORT_A" "$REF_B" "$SHORT_B" "$COUNT" "$BENCHTIME"
 
     if [ "$PARSE_OK" = "1" ]; then
-        emit_section "Parser" "$SHORT_A" "$SHORT_B" "$PARSE_OUT_A" "$PARSE_OUT_B" "no parse benchmarks in either ref"
+        emit_section "Parser" "no parse benchmarks in either ref" \
+            "$SHORT_A" "$PARSE_OUT_A" \
+            "$SHORT_B" "$PARSE_OUT_B"
     else
         printf "**Parser**\n\n_Not run: no parser_bench_test.go in either ref._\n\n"
     fi
 
     if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
-        emit_section "Query plan / execute" "$SHORT_A" "$SHORT_B" "$PLAN_OUT_A" "$PLAN_OUT_B" "see below"
-    elif [ "$PLAN_A" = "1" ]; then
+        emit_section "Query plan / execute" "see below" \
+            "$SHORT_A" "$PLAN_OUT_A" \
+            "$SHORT_B" "$PLAN_OUT_B"
+    elif [ "$PLAN_A" = "1" ] || [ "$PLAN_B" = "1" ]; then
+        if [ "$PLAN_A" = "1" ]; then
+            SOLO_REF="$REF_A"; SOLO_SHORT="$SHORT_A"
+            UNCACHED="$PLAN_SOLO_UNCACHED_A"
+            PLANNED="$PLAN_SOLO_PLANNED_A"
+            APPEND="$PLAN_SOLO_APPEND_A"
+            EAGER="$PLAN_SOLO_APPEND_EAGER_A"
+            OTHER_LABEL="B"
+        else
+            SOLO_REF="$REF_B"; SOLO_SHORT="$SHORT_B"
+            UNCACHED="$PLAN_SOLO_UNCACHED_B"
+            PLANNED="$PLAN_SOLO_PLANNED_B"
+            APPEND="$PLAN_SOLO_APPEND_B"
+            EAGER="$PLAN_SOLO_APPEND_EAGER_B"
+            OTHER_LABEL="A"
+        fi
         printf "**Query plan / execute**\n\n"
-        printf "_Only \`%s\` (A) has \`plan_bench_test.go\`. The numbers below are the win on A from caching the query plan (planned vs uncached on the same ref). Adopting plan support on B would unlock these gains._\n\n" "$REF_A"
-        emit_section "Planned vs uncached on $SHORT_A" "uncached" "planned" "$PLAN_SOLO_UNCACHED_A" "$PLAN_SOLO_PLANNED_A" "no planned/uncached pairs found"
-    elif [ "$PLAN_B" = "1" ]; then
-        printf "**Query plan / execute**\n\n"
-        printf "_Only \`%s\` (B) has \`plan_bench_test.go\`. The numbers below are the win on B from caching the query plan (planned vs uncached on the same ref). Adopting plan support on A (upstream) would unlock these gains._\n\n" "$REF_B"
-        emit_section "Planned vs uncached on $SHORT_B" "uncached" "planned" "$PLAN_SOLO_UNCACHED_B" "$PLAN_SOLO_PLANNED_B" "no planned/uncached pairs found"
+        printf "_Only \`%s\` has \`plan_bench_test.go\`. The table below stacks four execution tiers on the supporting ref. \`uncached\` is the baseline (no plan caching, default executor). \`planned\` adds plan caching (default-on for adopters; the case for %s to merge plan support). \`+append\` adopts the resolver-side append API (opt-in, requires schema-author changes). \`+append-eager\` enables eager-mode append for further reduction. Δ on each tier is vs the \`uncached\` baseline._\n\n" \
+            "$SOLO_REF" "$OTHER_LABEL"
+        emit_section "Execution tiers on $SOLO_SHORT" "missing per-tier output" \
+            "uncached"     "$UNCACHED" \
+            "planned"      "$PLANNED" \
+            "+append"      "$APPEND" \
+            "+append-eager" "$EAGER"
     else
         printf "**Query plan / execute**\n\n_Not run: neither ref has \`plan_bench_test.go\`._\n\n"
     fi
@@ -234,12 +327,10 @@ if [ ! -f "$README" ]; then
     exit 0
 fi
 
-# Replace content between markers, or append a Performance section if no markers.
 START="<!-- perf-start -->"
 END="<!-- perf-end -->"
 
 if grep -q "$START" "$README" && grep -q "$END" "$README"; then
-    # Splice between markers.
     awk -v start="$START" -v end="$END" -v table_file="$TABLE" '
         BEGIN { in_section = 0 }
         index($0, start) { print; while ((getline line < table_file) > 0) print line; in_section = 1; next }

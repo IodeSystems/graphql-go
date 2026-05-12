@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+#
+# bin/perf — compare benchmark performance between two git refs.
+#
+# Uses git worktrees so the working tree is never disturbed. Auto-detects
+# query-plan support (presence of plan_bench_test.go) in each ref and runs
+# planner benchmarks only when both refs support them.
+#
+# Usage:
+#   bin/perf                              # upstream/master vs HEAD
+#   bin/perf <ref-a> <ref-b>              # explicit refs
+#   bin/perf <ref-a> <ref-b> --no-readme  # skip README update; print to stdout
+#
+# Requires: go, git, benchstat (auto-installed if missing).
+
+set -euo pipefail
+
+REF_A="${1:-upstream/master}"
+REF_B="${2:-HEAD}"
+UPDATE_README=1
+[ "${3:-}" = "--no-readme" ] && UPDATE_README=0
+
+PARSE_PATTERN='^BenchmarkParse_'
+# When both refs support query plan, compare A vs B on planned + cache benches.
+PLAN_AB_PATTERN='^BenchmarkPlanned|^BenchmarkPlanCache_'
+# When only one ref supports query plan, render that ref's planned-vs-uncached
+# delta as the case for adoption.
+PLAN_ONLY_PLANNED='^BenchmarkPlannedExecute_'
+PLAN_ONLY_UNCACHED='^BenchmarkUncachedExecute_'
+COUNT="${PERF_COUNT:-6}"
+BENCHTIME="${PERF_BENCHTIME:-2s}"
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+err() { echo "perf: $*" >&2; }
+
+# Resolve refs.
+SHA_A=$(git rev-parse --verify "$REF_A" 2>/dev/null) || { err "unknown ref: $REF_A"; exit 1; }
+SHA_B=$(git rev-parse --verify "$REF_B" 2>/dev/null) || { err "unknown ref: $REF_B"; exit 1; }
+SHORT_A=$(git rev-parse --short "$SHA_A")
+SHORT_B=$(git rev-parse --short "$SHA_B")
+
+# benchstat — install if missing.
+if ! command -v benchstat >/dev/null; then
+    err "installing benchstat..."
+    go install golang.org/x/perf/cmd/benchstat@latest
+fi
+if ! command -v benchstat >/dev/null; then
+    err "benchstat not on PATH after install; check \$GOBIN/\$GOPATH/bin"
+    exit 1
+fi
+
+TMP=$(mktemp -d)
+WT_A="$TMP/wt-a"
+WT_B="$TMP/wt-b"
+
+cleanup() {
+    git worktree remove --force "$WT_A" >/dev/null 2>&1 || true
+    git worktree remove --force "$WT_B" >/dev/null 2>&1 || true
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+err "preparing worktrees..."
+git worktree add --detach "$WT_A" "$SHA_A" >/dev/null
+git worktree add --detach "$WT_B" "$SHA_B" >/dev/null
+
+has_plan() { test -f "$1/plan_bench_test.go"; }
+has_parse_bench() { test -f "$1/language/parser/parser_bench_test.go"; }
+
+PLAN_A=0; has_plan "$WT_A" && PLAN_A=1
+PLAN_B=0; has_plan "$WT_B" && PLAN_B=1
+PARSE_OK=0
+# Both refs need parser_bench_test.go. If either is missing, copy from the
+# ref that does have it so we can still measure parse on the other side.
+if has_parse_bench "$WT_A" && has_parse_bench "$WT_B"; then
+    PARSE_OK=1
+elif has_parse_bench "$WT_A" || has_parse_bench "$WT_B"; then
+    SRC="$WT_A"
+    DST="$WT_B"
+    if has_parse_bench "$WT_B"; then SRC="$WT_B"; DST="$WT_A"; fi
+    cp "$SRC/language/parser/parser_bench_test.go" "$DST/language/parser/parser_bench_test.go"
+    PARSE_OK=1
+    err "copied parser_bench_test.go from $SRC into $DST"
+fi
+
+run_bench() {
+    local dir=$1 pat=$2 pkg=$3 out=$4
+    err "  $pat ($pkg) in $(basename "$dir")"
+    (cd "$dir" && go test -run='^$' -bench="$pat" -benchtime="$BENCHTIME" -count="$COUNT" "$pkg" 2>/dev/null) > "$out"
+}
+
+# File names show up as benchstat column headers — keep them short and meaningful.
+PARSE_OUT_A="$TMP/${SHORT_A}-parse.txt"
+PARSE_OUT_B="$TMP/${SHORT_B}-parse.txt"
+PLAN_OUT_A="$TMP/${SHORT_A}-plan.txt"
+PLAN_OUT_B="$TMP/${SHORT_B}-plan.txt"
+# Used when only one ref supports plan: planned vs uncached on the supporting ref.
+PLAN_SOLO_PLANNED_A="$TMP/${SHORT_A}-planned.txt"
+PLAN_SOLO_UNCACHED_A="$TMP/${SHORT_A}-uncached.txt"
+PLAN_SOLO_PLANNED_B="$TMP/${SHORT_B}-planned.txt"
+PLAN_SOLO_UNCACHED_B="$TMP/${SHORT_B}-uncached.txt"
+
+if [ "$PARSE_OK" = "1" ]; then
+    err "==> parse benchmarks ($SHORT_A)"
+    run_bench "$WT_A" "$PARSE_PATTERN" "./language/parser/" "$PARSE_OUT_A"
+    err "==> parse benchmarks ($SHORT_B)"
+    run_bench "$WT_B" "$PARSE_PATTERN" "./language/parser/" "$PARSE_OUT_B"
+fi
+
+# Strip the Planned/Uncached prefix so a single-ref planned-vs-uncached
+# benchstat can pair benchmarks by their shared suffix.
+strip_plan_prefix() {
+    sed -i \
+        -e 's/PlannedExecute_/Execute_/g' \
+        -e 's/UncachedExecute_/Execute_/g' \
+        "$1"
+}
+
+if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
+    err "==> plan benchmarks ($SHORT_A)"
+    run_bench "$WT_A" "$PLAN_AB_PATTERN" "./" "$PLAN_OUT_A"
+    err "==> plan benchmarks ($SHORT_B)"
+    run_bench "$WT_B" "$PLAN_AB_PATTERN" "./" "$PLAN_OUT_B"
+elif [ "$PLAN_A" = "1" ] || [ "$PLAN_B" = "1" ]; then
+    # Solo path: render planned-vs-uncached delta on the supporting ref.
+    if [ "$PLAN_A" = "1" ]; then
+        err "==> planned vs uncached ($SHORT_A) — solo (other ref lacks plan)"
+        run_bench "$WT_A" "$PLAN_ONLY_PLANNED" "./" "$PLAN_SOLO_PLANNED_A"
+        run_bench "$WT_A" "$PLAN_ONLY_UNCACHED" "./" "$PLAN_SOLO_UNCACHED_A"
+        strip_plan_prefix "$PLAN_SOLO_PLANNED_A"
+        strip_plan_prefix "$PLAN_SOLO_UNCACHED_A"
+    fi
+    if [ "$PLAN_B" = "1" ]; then
+        err "==> planned vs uncached ($SHORT_B) — solo (other ref lacks plan)"
+        run_bench "$WT_B" "$PLAN_ONLY_PLANNED" "./" "$PLAN_SOLO_PLANNED_B"
+        run_bench "$WT_B" "$PLAN_ONLY_UNCACHED" "./" "$PLAN_SOLO_UNCACHED_B"
+        strip_plan_prefix "$PLAN_SOLO_PLANNED_B"
+        strip_plan_prefix "$PLAN_SOLO_UNCACHED_B"
+    fi
+fi
+
+# Summary table extractor: pulls each benchmark's sec/op delta out of
+# benchstat's CSV output and emits a markdown table row.
+summary_table() {
+    local title=$1 col_a=$2 col_b=$3 a=$4 b=$5
+    # Run benchstat from the file's directory so column headers are basenames,
+    # not absolute temp paths.
+    local dir
+    dir=$(dirname "$a")
+    (cd "$dir" && benchstat -format csv "$(basename "$a")" "$(basename "$b")" 2>/dev/null) | \
+    awk -v title="$title" -v col_a="$col_a" -v col_b="$col_b" '
+        BEGIN { FS=","; printed=0 }
+        # Section header rows have the metric in column 2 (e.g. "sec/op").
+        # We only want sec/op deltas in the summary.
+        $2 == "sec/op" { in_section = 1; next }
+        $2 == "B/op" || $2 == "allocs/op" { in_section = 0; next }
+        /^,/ { next }                      # other header / blank-ish
+        in_section && $1 != "" && $1 != "geomean" && $6 != "" {
+            if (!printed) {
+                print "**" title " — sec/op**"
+                print ""
+                printf "| Benchmark | %s | %s | Δ |\n", col_a, col_b
+                print "|---|---:|---:|---:|"
+                printed = 1
+            }
+            printf "| %s | %s | %s | %s |\n", $1, fmt($2), fmt($4), $6
+        }
+        in_section && $1 == "geomean" {
+            printf "| **geomean** | **%s** | **%s** | **%s** |\n", fmt($2), fmt($4), $6
+        }
+        function fmt(v,    n) {
+            n = v + 0
+            if (n == 0) return v
+            if (n < 1e-6) return sprintf("%.0fns", n*1e9)
+            if (n < 1e-3) return sprintf("%.2fµs", n*1e6)
+            if (n < 1)    return sprintf("%.2fms", n*1000)
+            return sprintf("%.2fs", n)
+        }
+    '
+}
+
+emit_section() {
+    local title=$1 col_a=$2 col_b=$3 a=$4 b=$5 hint=$6
+    if [ ! -s "$a" ] || [ ! -s "$b" ]; then
+        printf "**%s**\n\n_Not run: %s_\n\n" "$title" "$hint"
+        return
+    fi
+    summary_table "$title" "$col_a" "$col_b" "$a" "$b"
+    local dir
+    dir=$(dirname "$a")
+    printf "\n<details>\n<summary>Full benchstat output</summary>\n\n\`\`\`\n"
+    (cd "$dir" && benchstat "$(basename "$a")" "$(basename "$b")" 2>/dev/null)
+    printf "\`\`\`\n\n</details>\n\n"
+}
+
+DATE=$(date -u +%Y-%m-%d)
+TABLE=$(mktemp)
+{
+    printf "_Generated by \`bin/perf\` on %s. A=\`%s\` (%s), B=\`%s\` (%s). count=%s, benchtime=%s._\n\n" \
+        "$DATE" "$REF_A" "$SHORT_A" "$REF_B" "$SHORT_B" "$COUNT" "$BENCHTIME"
+
+    if [ "$PARSE_OK" = "1" ]; then
+        emit_section "Parser" "$SHORT_A" "$SHORT_B" "$PARSE_OUT_A" "$PARSE_OUT_B" "no parse benchmarks in either ref"
+    else
+        printf "**Parser**\n\n_Not run: no parser_bench_test.go in either ref._\n\n"
+    fi
+
+    if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
+        emit_section "Query plan / execute" "$SHORT_A" "$SHORT_B" "$PLAN_OUT_A" "$PLAN_OUT_B" "see below"
+    elif [ "$PLAN_A" = "1" ]; then
+        printf "**Query plan / execute**\n\n"
+        printf "_Only \`%s\` (A) has \`plan_bench_test.go\`. The numbers below are the win on A from caching the query plan (planned vs uncached on the same ref). Adopting plan support on B would unlock these gains._\n\n" "$REF_A"
+        emit_section "Planned vs uncached on $SHORT_A" "uncached" "planned" "$PLAN_SOLO_UNCACHED_A" "$PLAN_SOLO_PLANNED_A" "no planned/uncached pairs found"
+    elif [ "$PLAN_B" = "1" ]; then
+        printf "**Query plan / execute**\n\n"
+        printf "_Only \`%s\` (B) has \`plan_bench_test.go\`. The numbers below are the win on B from caching the query plan (planned vs uncached on the same ref). Adopting plan support on A (upstream) would unlock these gains._\n\n" "$REF_B"
+        emit_section "Planned vs uncached on $SHORT_B" "uncached" "planned" "$PLAN_SOLO_UNCACHED_B" "$PLAN_SOLO_PLANNED_B" "no planned/uncached pairs found"
+    else
+        printf "**Query plan / execute**\n\n_Not run: neither ref has \`plan_bench_test.go\`._\n\n"
+    fi
+} > "$TABLE"
+
+if [ "$UPDATE_README" = "0" ]; then
+    cat "$TABLE"
+    exit 0
+fi
+
+README="$REPO_ROOT/README.md"
+if [ ! -f "$README" ]; then
+    err "README.md not found; printing to stdout"
+    cat "$TABLE"
+    exit 0
+fi
+
+# Replace content between markers, or append a Performance section if no markers.
+START="<!-- perf-start -->"
+END="<!-- perf-end -->"
+
+if grep -q "$START" "$README" && grep -q "$END" "$README"; then
+    # Splice between markers.
+    awk -v start="$START" -v end="$END" -v table_file="$TABLE" '
+        BEGIN { in_section = 0 }
+        index($0, start) { print; while ((getline line < table_file) > 0) print line; in_section = 1; next }
+        index($0, end)   { in_section = 0; print; next }
+        !in_section { print }
+    ' "$README" > "$README.tmp"
+    mv "$README.tmp" "$README"
+    err "updated README.md between markers"
+else
+    err "no perf markers in README.md; please add a Performance section with:"
+    err "  $START"
+    err "  $END"
+    err "or run bin/perf <a> <b> --no-readme to print to stdout"
+    exit 1
+fi

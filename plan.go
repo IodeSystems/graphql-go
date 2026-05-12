@@ -781,12 +781,24 @@ func resolvePlannedField(eCtx *executionContext, parentType *Object, source inte
 	// later (breadth-first), long after this function returns. The
 	// append-mode walker dethunks synchronously and can safely pool;
 	// see writePlannedField.
-	args := make(map[string]interface{}, len(fp.args.static)+len(fp.args.dynamicArgDefs))
-	for k, v := range fp.args.static {
-		args[k] = v
-	}
-	if len(fp.args.dynamicArgDefs) > 0 {
-		populateArgumentValues(args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues)
+	//
+	// Fast path for arg-less fields: hand back a shared empty map.
+	// Resolvers must treat p.Args as read-only (documented contract);
+	// thunks may close over it but len==0 means there's nothing to read,
+	// so the singleton is safe even on the no-pool path. Saves one map
+	// alloc per resolved field on schemas without arguments — the
+	// dominant shape for list-of-leaves workloads.
+	var args map[string]interface{}
+	if len(fp.args.static) == 0 && len(fp.args.dynamicArgDefs) == 0 {
+		args = emptyArgsMap
+	} else {
+		args = make(map[string]interface{}, len(fp.args.static)+len(fp.args.dynamicArgDefs))
+		for k, v := range fp.args.static {
+			args[k] = v
+		}
+		if len(fp.args.dynamicArgDefs) > 0 {
+			populateArgumentValues(args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues)
+		}
 	}
 
 	info := ResolveInfo{

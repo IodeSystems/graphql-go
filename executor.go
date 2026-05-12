@@ -118,6 +118,13 @@ var argsMapPool = sync.Pool{
 	},
 }
 
+// emptyArgsMap is a shared, never-mutated zero-length map used as
+// p.Args for resolvers on arg-less fields. Resolvers must treat
+// p.Args as read-only (documented contract), so a singleton is safe
+// even on the no-pool path: there are no entries to read or mutate.
+// Avoids one map allocation per arg-less resolver call.
+var emptyArgsMap = map[string]interface{}{}
+
 // acquireArgsMap returns a cleared args map suitable for one
 // resolver call. Always returns a non-nil map; ResolveParams.Args is
 // non-nil by historical contract.

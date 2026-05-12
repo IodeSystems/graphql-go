@@ -114,6 +114,12 @@ type executionContext struct {
 	// see normal *ResponsePath values via ResolveInfo.Path.
 	pathPage []ResponsePath
 	pathIdx  int
+
+	// thunkCount is incremented every time a resolver-returned func
+	// (a thunk) is wrapped by completePlannedValue. The dethunk pass
+	// only needs to run when this is > 0; for thunk-free schemas
+	// (the dominant shape) we skip the entire tree walk.
+	thunkCount int
 }
 
 const (

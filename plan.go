@@ -696,12 +696,16 @@ func ExecutePlan(plan *Plan, p ExecuteParams) (result *Result) {
 		data := executePlannedSelection(eCtx, plan.root, p.Root, plan.rootType, nil)
 		// Mutations run serially with each field's result
 		// dethunked depth-first; queries run all then dethunk
-		// breadth-first. The traversal here just runs the appropriate
-		// dethunker on the assembled map.
-		if plan.isMutation {
-			dethunkMapDepthFirst(data)
-		} else {
-			dethunkMapWithBreadthFirstTraversal(data)
+		// breadth-first. Skip the entire dethunk pass when no
+		// resolver returned a func() — the dominant case in
+		// production schemas — saving the full tree walk plus
+		// the per-node closure pushes the BFS dethunker would do.
+		if eCtx.thunkCount > 0 {
+			if plan.isMutation {
+				dethunkMapDepthFirst(data)
+			} else {
+				dethunkMapWithBreadthFirstTraversal(data)
+			}
 		}
 		out.Data = data
 		out.Errors = append(out.Errors, eCtx.Errors...)
@@ -863,6 +867,7 @@ func completePlannedValueCatchingError(eCtx *executionContext, returnType Type, 
 func completePlannedValue(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}) interface{} {
 	resultVal := reflect.ValueOf(result)
 	if resultVal.IsValid() && resultVal.Kind() == reflect.Func {
+		eCtx.thunkCount++
 		return func() interface{} {
 			return completePlannedThunkValueCatchingError(eCtx, returnType, fp, info, path, result)
 		}

@@ -681,7 +681,9 @@ func appendStringJSON(dst []byte, value interface{}) []byte {
 }
 
 // appendDateTimeJSON renders a time.Time / *time.Time as the JSON
-// quoted RFC 3339 form serializeDateTime would produce.
+// quoted RFC 3339 form serializeDateTime would produce. Formats
+// directly into dst to avoid the MarshalText + string conversion
+// allocations.
 func appendDateTimeJSON(dst []byte, value interface{}) []byte {
 	var t time.Time
 	switch v := value.(type) {
@@ -695,11 +697,13 @@ func appendDateTimeJSON(dst []byte, value interface{}) []byte {
 	default:
 		return append(dst, "null"...)
 	}
-	buf, err := t.MarshalText()
-	if err != nil {
-		return append(dst, "null"...)
-	}
-	return appendJSONString(dst, string(buf))
+	// time.MarshalText produces RFC 3339 with nanosecond precision
+	// (time.RFC3339Nano). Format directly to avoid the []byte + string
+	// allocations of MarshalText. MarshalText never errors for a
+	// time.Time value, so we skip the error check.
+	dst = append(dst, '"')
+	dst = t.AppendFormat(dst, time.RFC3339Nano)
+	return append(dst, '"')
 }
 
 const hexChars = "0123456789abcdef"

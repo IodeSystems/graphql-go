@@ -23,17 +23,6 @@ type ExecuteParams struct {
 	// information to resolve functions.
 	Context context.Context
 
-	// PreserveInfoPath disables the append-mode executor's depth-stack
-	// path representation and restores per-field *ResponsePath
-	// allocation so ResolveInfo.Path is populated for every resolver
-	// call (today's spec contract). The default — false — leaves
-	// info.Path nil under ExecutePlanAppend and reclaims one alloc
-	// per resolved field and per list item. Set true if any resolver
-	// in the schema reads info.Path (DataLoader keyed on path,
-	// tracing spans, federation refs). Has no effect on ExecutePlan,
-	// which always populates info.Path.
-	PreserveInfoPath bool
-
 	// ConcurrentThunks restores the thunk-concurrency contract under
 	// the append-mode executor by delegating to ExecutePlan +
 	// json.Marshal: thunked resolvers (`func() (interface{}, error)`)
@@ -72,6 +61,15 @@ func Execute(p ExecuteParams) (result *Result) {
 	return ExecutePlan(plan, p)
 }
 
+// pathEntry holds one segment of the lazy response path.
+// key is non-empty for field names; idx is valid (>= 0) for list indices.
+// Stored inline in pathBuf ([]pathEntry) to avoid per-element interface{}
+// boxing — the struct values live directly in the slice's backing array.
+type pathEntry struct {
+	key string // field name, empty for list index
+	idx int    // list index, -1 for field name
+}
+
 type buildExecutionCtxParams struct {
 	Schema        Schema
 	Root          interface{}
@@ -91,12 +89,11 @@ type executionContext struct {
 	Errors         []gqlerrors.FormattedError
 	Context        context.Context
 
-	// lazyPath mirrors ExecuteParams.LazyPath. When true, the
-	// append-mode walker uses pathBuf as the authoritative depth-stack
-	// for the response path and skips per-field *ResponsePath
-	// allocation. Always false for the map-tree executor.
-	lazyPath bool
-	pathBuf  []interface{}
+	// pathBuf is the depth-stack for the response path. Entries are
+	// stored inline ([]pathEntry) to avoid per-element interface{}
+	// boxing. Used by the append-mode walker for error path
+	// reconstruction. ResolveInfo.Path is nil under append mode.
+	pathBuf []pathEntry
 
 	// retainArgs mirrors !ExecuteParams.RetainArgs. When true (the
 	// default), the executor recycles per-resolver args maps through
@@ -105,13 +102,14 @@ type executionContext struct {
 	// past the resolve call (struct fields, channels, goroutines).
 	poolArgs bool
 
-	// ResponsePath slab. The map-tree executor allocates a fresh
-	// *ResponsePath per resolved field and per list element; the slab
-	// amortizes those into geometric-growth pages so wide/list-heavy
-	// queries pay one heap alloc per ~16-256 paths instead of one per
-	// path. Pages are never grown in place, so pointers handed out
-	// earlier remain valid for the lifetime of the response. Resolvers
-	// see normal *ResponsePath values via ResolveInfo.Path.
+	// ResponsePath slab. The map-tree executor (ExecutePlan) allocates
+	// a fresh *ResponsePath per resolved field and per list element;
+	// the slab amortizes those into geometric-growth pages so
+	// wide/list-heavy queries pay one heap alloc per ~16-256 paths
+	// instead of one per path. Pages are never grown in place, so
+	// pointers handed out earlier remain valid for the lifetime of
+	// the response. Resolvers see normal *ResponsePath values via
+	// ResolveInfo.Path.
 	pathPage []ResponsePath
 	pathIdx  int
 
@@ -129,7 +127,8 @@ const (
 
 // allocResponsePath returns a *ResponsePath populated with (prev, key),
 // drawn from the executionContext's slab. Functionally equivalent to
-// `prev.WithKey(key)` but amortizes the heap allocation.
+// `prev.WithKey(key)` but amortizes the heap allocation. Used by the
+// map-tree executor (ExecutePlan) for info.Path.
 func (eCtx *executionContext) allocResponsePath(prev *ResponsePath, key interface{}) *ResponsePath {
 	if eCtx.pathIdx == len(eCtx.pathPage) {
 		next := len(eCtx.pathPage) * 2
@@ -188,33 +187,25 @@ func releaseArgsMap(m map[string]interface{}) {
 	argsMapPool.Put(m)
 }
 
-// popPath truncates pathBuf back to the depth captured at the
-// caller's push site. The walker open-codes the push (a branch on
-// eCtx.lazyPath either WithKey-allocates or appends to pathBuf) but
-// routes the pop through here so the deferred recover handlers
-// converge on a single helper for both normal-return and
-// panic-propagation paths.
-func (eCtx *executionContext) popPath(entryDepth int) {
-	if entryDepth < 0 || !eCtx.lazyPath {
-		return
-	}
-	eCtx.pathBuf = eCtx.pathBuf[:entryDepth]
-}
-
 // errorPathArray returns the response-path locator for an error
-// envelope. Under default mode the linked-list *ResponsePath argument
-// is walked; under lazyPath the pathBuf depth-stack is snapshotted.
-// Caller is responsible for not retaining the returned slice past the
-// next pushPath/popPath cycle.
+// envelope. The map-tree executor (ExecutePlan) passes a non-nil
+// *ResponsePath which is walked via AsArray. The append-mode executor
+// passes nil and the path is reconstructed from pathBuf.
 func (eCtx *executionContext) errorPathArray(path *ResponsePath) []interface{} {
 	if path != nil {
 		return path.AsArray()
 	}
-	if !eCtx.lazyPath || len(eCtx.pathBuf) == 0 {
+	if len(eCtx.pathBuf) == 0 {
 		return nil
 	}
 	out := make([]interface{}, len(eCtx.pathBuf))
-	copy(out, eCtx.pathBuf)
+	for i, e := range eCtx.pathBuf {
+		if e.key != "" {
+			out[i] = e.key
+		} else {
+			out[i] = e.idx
+		}
+	}
 	return out
 }
 

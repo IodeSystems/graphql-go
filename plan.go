@@ -95,6 +95,13 @@ type fieldPlan struct {
 	// returns a composite (Object / Interface / Union) or when
 	// leafEmitter is set (the walker uses leafEmitter directly).
 	leafType Leaf
+
+	// listElemType is the reflect.Type of the concrete Go element
+	// type for list-returning fields, populated lazily on first
+	// execution. Enables typed iteration (int/String/bool/float64)
+	// without reflect.Value.Interface() boxing. nil for non-list
+	// fields or when the element type is unknown.
+	listElemType reflect.Type
 }
 
 // argPlan separates per-arg coercion into a plan-time slice
@@ -1053,7 +1060,6 @@ func ExecutePlanAppend(plan *Plan, p ExecuteParams, dst []byte) ([]byte, []gqler
 		Operation:      plan.operation,
 		VariableValues: variableValues,
 		Context:        ctx,
-		lazyPath:       !p.PreserveInfoPath,
 		poolArgs:       !p.RetainArgs,
 	}
 
@@ -1177,20 +1183,14 @@ func writePlannedSelection(eCtx *executionContext, sp *selectionPlan, source int
 // NonNull fp.returnType the panic re-propagates (handleFieldError
 // re-panics) so the next nullable boundary above can absorb it.
 func writePlannedField(eCtx *executionContext, parentType *Object, source interface{}, fp *fieldPlan, path *ResponsePath, dst []byte) (out []byte) {
-	var fieldPath *ResponsePath
-	pathDepth := -1
-	if !eCtx.lazyPath {
-		fieldPath = eCtx.allocResponsePath(path, fp.responseKey)
-	} else {
-		pathDepth = len(eCtx.pathBuf)
-		eCtx.pathBuf = append(eCtx.pathBuf, fp.responseKey)
-	}
+	pathDepth := len(eCtx.pathBuf)
+	eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{key: fp.responseKey})
 	keyStart := len(dst)
 
 	info := ResolveInfo{
 		FieldName:      fp.fieldName,
 		FieldASTs:      fp.fieldASTs,
-		Path:           fieldPath,
+		Path:           nil,
 		ReturnType:     fp.returnType,
 		ParentType:     parentType,
 		Schema:         eCtx.Schema,
@@ -1201,7 +1201,7 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	}
 
 	out = dst
-	defer recoverPlannedField(&out, keyStart, fp, fieldPath, eCtx, pathDepth)
+	defer recoverPlannedField(&out, keyStart, fp, eCtx, pathDepth)
 
 	fieldDef := fp.fieldDef
 
@@ -1286,7 +1286,7 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	}
 
 	out = append(dst, fp.responseKeyJSON...)
-	out = writeCompleteValueCatchingError(eCtx, fp.returnType, fp, info, fieldPath, result, out, -1)
+	out = writeCompleteValueCatchingError(eCtx, fp.returnType, fp, info, nil, result, out, -1)
 	return out
 }
 
@@ -1316,20 +1316,18 @@ func writeCompleteValueCatchingError(eCtx *executionContext, returnType Type, fp
 // `"responseKey":null`. Lifted out of a closure so the defer record
 // can be open-coded onto the stack.
 //
-// Always pops the lazyPath depth-stack to pathEntry before returning,
-// even when no panic fired: the recover handler is the convergence
-// point for both normal-return and panic-propagation paths out of the
-// field walk, so it owns the pop.
-func recoverPlannedField(out *[]byte, keyStart int, fp *fieldPlan, fieldPath *ResponsePath, eCtx *executionContext, pathEntry int) {
+// Pops the pathBuf depth-stack to pathEntry on the normal-return path
+// (r == nil). On the panic path, the pop is deferred so errorPathArray
+// can read the full path before it's truncated.
+func recoverPlannedField(out *[]byte, keyStart int, fp *fieldPlan, eCtx *executionContext, pathEntry int) {
 	r := recover()
-	if pathEntry >= 0 {
-		defer eCtx.popPath(pathEntry)
-	}
 	if r == nil {
+		eCtx.pathBuf = eCtx.pathBuf[:pathEntry]
 		return
 	}
+	defer func() { eCtx.pathBuf = eCtx.pathBuf[:pathEntry] }()
 	*out = (*out)[:keyStart]
-	handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), fieldPath, fp.returnType, eCtx)
+	handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), nil, fp.returnType, eCtx)
 	*out = append(*out, fp.responseKeyJSON...)
 	*out = append(*out, "null"...)
 }
@@ -1340,16 +1338,19 @@ func recoverPlannedField(out *[]byte, keyStart int, fp *fieldPlan, fieldPath *Re
 // the absorption point. Named-function defer keeps the record on
 // the stack.
 //
-// Pops the lazyPath depth-stack to pathEntry unconditionally (no-op
-// for -1 / non-lazy callers) so per-list-item pushes are cleaned up
-// on both normal-return and panic-propagation paths.
+// Pops the pathBuf depth-stack to pathEntry on the normal-return path
+// (r == nil). On the panic path, the pop is deferred so errorPathArray
+// can read the full path before it's truncated.
 func recoverCompleteValue(out *[]byte, entryLen int, fp *fieldPlan, path *ResponsePath, returnType Type, eCtx *executionContext, pathEntry int) {
 	r := recover()
-	if pathEntry >= 0 {
-		defer eCtx.popPath(pathEntry)
-	}
 	if r == nil {
+		if pathEntry >= 0 {
+			eCtx.pathBuf = eCtx.pathBuf[:pathEntry]
+		}
 		return
+	}
+	if pathEntry >= 0 {
+		defer func() { eCtx.pathBuf = eCtx.pathBuf[:pathEntry] }()
 	}
 	*out = (*out)[:entryLen]
 	handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), path, returnType, eCtx)
@@ -1490,6 +1491,11 @@ func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPl
 // completes via writeCompleteValueCatchingError, so nullable items
 // can absorb item-level non-null violations while non-null items
 // propagate the bubble up to the list's containing field.
+//
+// When fp.listElemType is known and is a primitive (string, int,
+// bool, float64), the walker iterates with typed accessors to avoid
+// reflect.Value.Interface() boxing. Unknown or composite element
+// types fall back to the generic reflect path.
 func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte) []byte {
 	resultVal := reflect.ValueOf(result)
 	if resultVal.Kind() == reflect.Ptr {
@@ -1506,21 +1512,77 @@ func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldP
 		panic(gqlerrors.FormatError(err))
 	}
 	itemType := returnType.OfType
+	n := resultVal.Len()
+
+	// Capture element type on first execution for future calls.
+	if fp.listElemType == nil && n > 0 {
+		fp.listElemType = resultVal.Type().Elem()
+	}
+
+	// Typed fast paths for primitive element types.
+	if fp.listElemType != nil {
+		switch fp.listElemType.Kind() {
+		case reflect.String:
+			dst = append(dst, '[')
+			for i := 0; i < n; i++ {
+				if i > 0 {
+					dst = append(dst, ',')
+				}
+				val := resultVal.Index(i).String()
+				itemDepth := len(eCtx.pathBuf)
+				eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
+				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
+			}
+			return append(dst, ']')
+		case reflect.Int:
+			dst = append(dst, '[')
+			for i := 0; i < n; i++ {
+				if i > 0 {
+					dst = append(dst, ',')
+				}
+				val := int(resultVal.Index(i).Int())
+				itemDepth := len(eCtx.pathBuf)
+				eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
+				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
+			}
+			return append(dst, ']')
+		case reflect.Bool:
+			dst = append(dst, '[')
+			for i := 0; i < n; i++ {
+				if i > 0 {
+					dst = append(dst, ',')
+				}
+				val := resultVal.Index(i).Bool()
+				itemDepth := len(eCtx.pathBuf)
+				eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
+				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
+			}
+			return append(dst, ']')
+		case reflect.Float64:
+			dst = append(dst, '[')
+			for i := 0; i < n; i++ {
+				if i > 0 {
+					dst = append(dst, ',')
+				}
+				val := resultVal.Index(i).Float()
+				itemDepth := len(eCtx.pathBuf)
+				eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
+				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
+			}
+			return append(dst, ']')
+		}
+	}
+
+	// Generic fallback: unknown element type or composite (struct, etc.).
 	dst = append(dst, '[')
-	for i := 0; i < resultVal.Len(); i++ {
+	for i := 0; i < n; i++ {
 		if i > 0 {
 			dst = append(dst, ',')
 		}
 		val := resultVal.Index(i).Interface()
-		var itemPath *ResponsePath
-		itemDepth := -1
-		if !eCtx.lazyPath {
-			itemPath = eCtx.allocResponsePath(path, i)
-		} else {
-			itemDepth = len(eCtx.pathBuf)
-			eCtx.pathBuf = append(eCtx.pathBuf, i)
-		}
-		dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, itemPath, val, dst, itemDepth)
+		itemDepth := len(eCtx.pathBuf)
+		eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
+		dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
 	}
 	return append(dst, ']')
 }

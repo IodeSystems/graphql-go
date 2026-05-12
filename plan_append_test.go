@@ -44,8 +44,8 @@ func runParity(t *testing.T, schema graphql.Schema, query, opName string, args m
 		t.Fatalf("marshal map result: %v", err)
 	}
 
-	// Fast default: PreserveInfoPath=false, info.Path nil under
-	// append-mode, depth-stack used for error paths.
+	// Append-mode: info.Path is nil, depth-stack (pathBuf) used for
+	// error path reconstruction.
 	appendBytes, specErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
 		Schema:        schema,
 		AST:           doc,
@@ -58,36 +58,15 @@ func runParity(t *testing.T, schema graphql.Schema, query, opName string, args m
 		t.Fatalf("append spec errors: %v", specErrs)
 	}
 
-	// Opt-out: PreserveInfoPath=true restores per-field *ResponsePath
-	// allocation; resolvers see a populated info.Path.
-	eagerBytes, eagerSpecErrs := graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{
-		Schema:           schema,
-		AST:              doc,
-		OperationName:    opName,
-		Args:             args,
-		Root:             root,
-		Context:          context.Background(),
-		PreserveInfoPath: true,
-	}, nil)
-	if len(eagerSpecErrs) > 0 {
-		t.Fatalf("append (PreserveInfoPath) spec errors: %v", eagerSpecErrs)
-	}
-
-	var mapDecoded, appendDecoded, eagerDecoded interface{}
+	var mapDecoded, appendDecoded interface{}
 	if err := json.Unmarshal(mapBytes, &mapDecoded); err != nil {
 		t.Fatalf("decode map: %v\nbytes: %s", err, mapBytes)
 	}
 	if err := json.Unmarshal(appendBytes, &appendDecoded); err != nil {
 		t.Fatalf("decode append: %v\nbytes: %s", err, appendBytes)
 	}
-	if err := json.Unmarshal(eagerBytes, &eagerDecoded); err != nil {
-		t.Fatalf("decode append (PreserveInfoPath): %v\nbytes: %s", err, eagerBytes)
-	}
 	if !reflect.DeepEqual(mapDecoded, appendDecoded) {
 		t.Fatalf("parity mismatch:\n  ExecutePlan:       %s\n  ExecutePlanAppend: %s", mapBytes, appendBytes)
-	}
-	if !reflect.DeepEqual(appendDecoded, eagerDecoded) {
-		t.Fatalf("PreserveInfoPath parity mismatch:\n  default:                            %s\n  ExecutePlanAppend(PreserveInfoPath): %s", appendBytes, eagerBytes)
 	}
 }
 
@@ -413,51 +392,9 @@ func TestAppendByteShape(t *testing.T) {
 	}
 }
 
-// TestAppendInfoPath_DefaultIsNil confirms append-mode's documented
-// contract: by default info.Path is nil for every resolver call.
-// Opting out via PreserveInfoPath=true restores the populated path.
-func TestAppendInfoPath_DefaultIsNil(t *testing.T) {
-	var sawPath, sawNil bool
-	probe := func(p graphql.ResolveParams) (interface{}, error) {
-		if p.Info.Path == nil {
-			sawNil = true
-		} else {
-			sawPath = true
-		}
-		return "ok", nil
-	}
-	schema, err := graphql.NewSchema(graphql.SchemaConfig{
-		Query: graphql.NewObject(graphql.ObjectConfig{
-			Name: "Q",
-			Fields: graphql.Fields{
-				"v": &graphql.Field{Type: graphql.String, Resolve: probe},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := source.NewSource(&source.Source{Body: []byte(`{ v }`), Name: "t"})
-	doc, _ := parser.Parse(parser.ParseParams{Source: src})
-	plan, _ := graphql.PlanQuery(&schema, doc, "")
-
-	sawPath, sawNil = false, false
-	_, _ = graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc}, nil)
-	if sawPath || !sawNil {
-		t.Fatalf("default mode: want nil info.Path; sawPath=%v sawNil=%v", sawPath, sawNil)
-	}
-
-	sawPath, sawNil = false, false
-	_, _ = graphql.ExecutePlanAppend(plan, graphql.ExecuteParams{Schema: schema, AST: doc, PreserveInfoPath: true}, nil)
-	if !sawPath || sawNil {
-		t.Fatalf("PreserveInfoPath: want non-nil info.Path; sawPath=%v sawNil=%v", sawPath, sawNil)
-	}
-}
-
-// TestAppendInfoPath_ErrorLocation confirms that error envelopes are
-// identical under default (depth-stack) and PreserveInfoPath
-// (per-field *ResponsePath) modes — both reconstruct the same spec
-// `path` array.
+// TestAppendInfoPath_ErrorLocation confirms that error envelopes
+// contain the correct `path` array reconstructed from the internal
+// depth-stack (pathBuf).
 func TestAppendInfoPath_ErrorLocation(t *testing.T) {
 	thing := graphql.NewObject(graphql.ObjectConfig{
 		Name: "Thing",

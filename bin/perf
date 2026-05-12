@@ -24,10 +24,23 @@
 
 set -euo pipefail
 
-REF_A="${1:-upstream/master}"
-REF_B="${2:-HEAD}"
+# Single-arg mode: bin/perf <ref> benchmarks the current working tree
+# (even if dirty) against <ref>. Two-arg mode: bin/perf <ref-a> <ref-b>
+# uses worktrees for both sides (requires clean commits).
 UPDATE_README=1
-[ "${3:-}" = "--no-readme" ] && UPDATE_README=0
+for arg in "$@"; do
+    [ "$arg" = "--no-readme" ] && UPDATE_README=0
+done
+if [ $# -eq 1 ] || { [ $# -eq 2 ] && [ "$2" = "--no-readme" ]; }; then
+    REF_A="${1}"
+    REF_B="."
+elif [ $# -eq 2 ]; then
+    REF_A="${1}"
+    REF_B="${2}"
+else
+    REF_A="upstream/master"
+    REF_B="HEAD"
+fi
 
 PARSE_PATTERN='^BenchmarkParse_'
 # When both refs support query plan, compare A vs B on planned + cache benches.
@@ -36,8 +49,7 @@ PLAN_AB_PATTERN='^BenchmarkPlanned|^BenchmarkPlanCache_'
 # independently and pair by suffix after prefix-stripping.
 PLAN_ONLY_UNCACHED='^BenchmarkUncachedExecute_'
 PLAN_ONLY_PLANNED='^BenchmarkPlannedExecute_'
-PLAN_ONLY_APPEND='^BenchmarkPlannedAppend_[^E]'        # excludes PlannedAppendEager_
-PLAN_ONLY_APPEND_EAGER='^BenchmarkPlannedAppendEager_'
+PLAN_ONLY_APPEND='^BenchmarkPlannedAppend_'
 COUNT="${PERF_COUNT:-6}"
 BENCHTIME="${PERF_BENCHTIME:-2s}"
 
@@ -46,10 +58,19 @@ cd "$REPO_ROOT"
 
 err() { echo "perf: $*" >&2; }
 
-SHA_A=$(git rev-parse --verify "$REF_A" 2>/dev/null) || { err "unknown ref: $REF_A"; exit 1; }
-SHA_B=$(git rev-parse --verify "$REF_B" 2>/dev/null) || { err "unknown ref: $REF_B"; exit 1; }
-SHORT_A=$(git rev-parse --short "$SHA_A")
-SHORT_B=$(git rev-parse --short "$SHA_B")
+# Resolve refs. "." means current working tree (no checkout needed).
+USE_DIR_B=0
+if [ "$REF_B" = "." ]; then
+    SHA_A=$(git rev-parse --verify "$REF_A" 2>/dev/null) || { err "unknown ref: $REF_A"; exit 1; }
+    SHORT_A=$(git rev-parse --short "$SHA_A")
+    SHORT_B="dirty"
+    USE_DIR_B=1
+else
+    SHA_A=$(git rev-parse --verify "$REF_A" 2>/dev/null) || { err "unknown ref: $REF_A"; exit 1; }
+    SHA_B=$(git rev-parse --verify "$REF_B" 2>/dev/null) || { err "unknown ref: $REF_B"; exit 1; }
+    SHORT_A=$(git rev-parse --short "$SHA_A")
+    SHORT_B=$(git rev-parse --short "$SHA_B")
+fi
 
 if ! command -v benchstat >/dev/null; then
     err "installing benchstat..."
@@ -73,7 +94,11 @@ trap cleanup EXIT
 
 err "preparing worktrees..."
 git worktree add --detach "$WT_A" "$SHA_A" >/dev/null
-git worktree add --detach "$WT_B" "$SHA_B" >/dev/null
+if [ "$USE_DIR_B" = "0" ]; then
+    git worktree add --detach "$WT_B" "$SHA_B" >/dev/null
+else
+    WT_B="$REPO_ROOT"
+fi
 
 has_plan() { test -f "$1/plan_bench_test.go"; }
 has_parse_bench() { test -f "$1/language/parser/parser_bench_test.go"; }
@@ -89,9 +114,17 @@ elif has_parse_bench "$WT_A" || has_parse_bench "$WT_B"; then
     SRC="$WT_A"
     DST="$WT_B"
     if has_parse_bench "$WT_B"; then SRC="$WT_B"; DST="$WT_A"; fi
-    cp "$SRC/language/parser/parser_bench_test.go" "$DST/language/parser/parser_bench_test.go"
+    # Rewrite module import path so the file compiles on the destination.
+    SRC_MOD=$(head -1 "$SRC/go.mod" | awk '{print $2}')
+    DST_MOD=$(head -1 "$DST/go.mod" | awk '{print $2}')
+    if [ "$SRC_MOD" != "$DST_MOD" ]; then
+        sed "s|$SRC_MOD|$DST_MOD|g" "$SRC/language/parser/parser_bench_test.go" \
+            > "$DST/language/parser/parser_bench_test.go"
+    else
+        cp "$SRC/language/parser/parser_bench_test.go" "$DST/language/parser/parser_bench_test.go"
+    fi
     PARSE_OK=1
-    err "copied parser_bench_test.go from $SRC into $DST"
+    err "copied parser_bench_test.go from $SRC into $DST (module: $SRC_MOD -> $DST_MOD)"
 fi
 
 run_bench() {
@@ -105,15 +138,13 @@ PARSE_OUT_A="$TMP/${SHORT_A}-parse.txt"
 PARSE_OUT_B="$TMP/${SHORT_B}-parse.txt"
 PLAN_OUT_A="$TMP/${SHORT_A}-plan.txt"
 PLAN_OUT_B="$TMP/${SHORT_B}-plan.txt"
-# Solo path: per-tier files (uncached/planned/append/eager) on each supporting ref.
+# Solo path: per-tier files (uncached/planned/append) on each supporting ref.
 PLAN_SOLO_UNCACHED_A="$TMP/${SHORT_A}-uncached.txt"
 PLAN_SOLO_PLANNED_A="$TMP/${SHORT_A}-planned.txt"
 PLAN_SOLO_APPEND_A="$TMP/${SHORT_A}-append.txt"
-PLAN_SOLO_APPEND_EAGER_A="$TMP/${SHORT_A}-append-eager.txt"
 PLAN_SOLO_UNCACHED_B="$TMP/${SHORT_B}-uncached.txt"
 PLAN_SOLO_PLANNED_B="$TMP/${SHORT_B}-planned.txt"
 PLAN_SOLO_APPEND_B="$TMP/${SHORT_B}-append.txt"
-PLAN_SOLO_APPEND_EAGER_B="$TMP/${SHORT_B}-append-eager.txt"
 
 if [ "$PARSE_OK" = "1" ]; then
     err "==> parse benchmarks ($SHORT_A)"
@@ -123,11 +154,9 @@ if [ "$PARSE_OK" = "1" ]; then
 fi
 
 # Strip the variant prefix so a per-tier benchstat run pairs benchmarks
-# by their shared suffix. Order matters: PlannedAppendEager_ must be
-# rewritten before PlannedAppend_ because the latter is a substring prefix.
+# by their shared suffix.
 strip_plan_prefix() {
     sed -i \
-        -e 's/PlannedAppendEager_/Execute_/g' \
         -e 's/PlannedAppend_/Execute_/g' \
         -e 's/PlannedExecute_/Execute_/g' \
         -e 's/UncachedExecute_/Execute_/g' \
@@ -136,16 +165,14 @@ strip_plan_prefix() {
 
 run_solo_tiers() {
     local short=$1 wt=$2
-    local uncached=$3 planned=$4 append=$5 eager=$6
+    local uncached=$3 planned=$4 append=$5
     err "==> per-tier benchmarks ($short) — solo (other ref lacks plan)"
     run_bench "$wt" "$PLAN_ONLY_UNCACHED"     "./" "$uncached"
     run_bench "$wt" "$PLAN_ONLY_PLANNED"      "./" "$planned"
     run_bench "$wt" "$PLAN_ONLY_APPEND"       "./" "$append"
-    run_bench "$wt" "$PLAN_ONLY_APPEND_EAGER" "./" "$eager"
     strip_plan_prefix "$uncached"
     strip_plan_prefix "$planned"
     strip_plan_prefix "$append"
-    strip_plan_prefix "$eager"
 }
 
 if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
@@ -156,11 +183,11 @@ if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
 elif [ "$PLAN_A" = "1" ]; then
     run_solo_tiers "$SHORT_A" "$WT_A" \
         "$PLAN_SOLO_UNCACHED_A" "$PLAN_SOLO_PLANNED_A" \
-        "$PLAN_SOLO_APPEND_A" "$PLAN_SOLO_APPEND_EAGER_A"
+        "$PLAN_SOLO_APPEND_A"
 elif [ "$PLAN_B" = "1" ]; then
     run_solo_tiers "$SHORT_B" "$WT_B" \
         "$PLAN_SOLO_UNCACHED_B" "$PLAN_SOLO_PLANNED_B" \
-        "$PLAN_SOLO_APPEND_B" "$PLAN_SOLO_APPEND_EAGER_B"
+        "$PLAN_SOLO_APPEND_B"
 fi
 
 # summary_table renders an N-column markdown table from benchstat's CSV
@@ -292,24 +319,21 @@ TABLE=$(mktemp)
             UNCACHED="$PLAN_SOLO_UNCACHED_A"
             PLANNED="$PLAN_SOLO_PLANNED_A"
             APPEND="$PLAN_SOLO_APPEND_A"
-            EAGER="$PLAN_SOLO_APPEND_EAGER_A"
             OTHER_LABEL="B"
         else
             SOLO_REF="$REF_B"; SOLO_SHORT="$SHORT_B"
             UNCACHED="$PLAN_SOLO_UNCACHED_B"
             PLANNED="$PLAN_SOLO_PLANNED_B"
             APPEND="$PLAN_SOLO_APPEND_B"
-            EAGER="$PLAN_SOLO_APPEND_EAGER_B"
             OTHER_LABEL="A"
         fi
         printf "**Query plan / execute**\n\n"
-        printf "_Only \`%s\` has \`plan_bench_test.go\`. The table below stacks four execution tiers on the supporting ref. \`uncached\` is the baseline (no plan caching, default executor). \`planned\` adds plan caching (default-on for adopters; the case for %s to merge plan support). \`+append\` adopts the resolver-side append API (opt-in, requires schema-author changes). \`+append-eager\` enables eager-mode append for further reduction. Δ on each tier is vs the \`uncached\` baseline._\n\n" \
+        printf "_Only \`%s\` has \`plan_bench_test.go\`. The table below stacks three execution tiers on the supporting ref. \`uncached\` is the baseline (no plan caching, default executor). \`planned\` adds plan caching (default-on for adopters; the case for %s to merge plan support). \`+append\` adopts the resolver-side append API (opt-in, requires schema-author changes). Δ on each tier is vs the \`uncached\` baseline._\n\n" \
             "$SOLO_REF" "$OTHER_LABEL"
         emit_section "Execution tiers on $SOLO_SHORT" "missing per-tier output" \
             "uncached"     "$UNCACHED" \
             "planned"      "$PLANNED" \
-            "+append"      "$APPEND" \
-            "+append-eager" "$EAGER"
+            "+append"      "$APPEND"
     else
         printf "**Query plan / execute**\n\n_Not run: neither ref has \`plan_bench_test.go\`._\n\n"
     fi

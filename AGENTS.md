@@ -36,9 +36,10 @@ No linter, formatter, build step, or codegen. `go fmt` and `go vet` are the only
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `PreserveInfoPath` | `false` | When false (default), `ResolveInfo.Path` is nil under `ExecutePlanAppend`. Set true if resolvers read `info.Path`. No effect on `ExecutePlan`. |
 | `ConcurrentThunks` | `false` | When true, delegates to `ExecutePlan` + `json.Marshal` for breadth-first thunk dethunking. Set if resolvers return `func() (interface{}, error)` thunks that kick off goroutines. |
 | `RetainArgs` | `false` | When false (default), the executor pools `ResolveParams.Args` via `sync.Pool`. Set true if resolvers retain `p.Args` past the call. |
+
+`ResolveInfo.Path` is `nil` under `ExecutePlanAppend`. Error paths are reconstructed from the internal `pathBuf` depth-stack. `ExecutePlan` (map-tree) always populates `info.Path`.
 
 ## Testing
 

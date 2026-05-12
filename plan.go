@@ -742,7 +742,7 @@ func executePlannedSelection(eCtx *executionContext, sp *selectionPlan, source i
 			// these but we match runtime behavior for safety.
 			continue
 		}
-		fieldPath := path.WithKey(fp.responseKey)
+		fieldPath := eCtx.allocResponsePath(path, fp.responseKey)
 		resolved, ok := resolvePlannedField(eCtx, parentType, source, fp, fieldPath)
 		if !ok {
 			continue
@@ -949,7 +949,7 @@ func completePlannedListValue(eCtx *executionContext, returnType *List, fp *fiel
 	completedResults := make([]interface{}, 0, resultVal.Len())
 	for i := 0; i < resultVal.Len(); i++ {
 		val := resultVal.Index(i).Interface()
-		fieldPath := path.WithKey(i)
+		fieldPath := eCtx.allocResponsePath(path, i)
 		completedItem := completePlannedValueCatchingError(eCtx, itemType, fp, info, fieldPath, val)
 		completedResults = append(completedResults, completedItem)
 	}
@@ -1175,7 +1175,7 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	var fieldPath *ResponsePath
 	pathDepth := -1
 	if !eCtx.lazyPath {
-		fieldPath = path.WithKey(fp.responseKey)
+		fieldPath = eCtx.allocResponsePath(path, fp.responseKey)
 	} else {
 		pathDepth = len(eCtx.pathBuf)
 		eCtx.pathBuf = append(eCtx.pathBuf, fp.responseKey)
@@ -1510,7 +1510,7 @@ func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldP
 		var itemPath *ResponsePath
 		itemDepth := -1
 		if !eCtx.lazyPath {
-			itemPath = path.WithKey(i)
+			itemPath = eCtx.allocResponsePath(path, i)
 		} else {
 			itemDepth = len(eCtx.pathBuf)
 			eCtx.pathBuf = append(eCtx.pathBuf, i)

@@ -104,6 +104,42 @@ type executionContext struct {
 	// args map — required when resolvers retain p.Args references
 	// past the resolve call (struct fields, channels, goroutines).
 	poolArgs bool
+
+	// ResponsePath slab. The map-tree executor allocates a fresh
+	// *ResponsePath per resolved field and per list element; the slab
+	// amortizes those into geometric-growth pages so wide/list-heavy
+	// queries pay one heap alloc per ~16-256 paths instead of one per
+	// path. Pages are never grown in place, so pointers handed out
+	// earlier remain valid for the lifetime of the response. Resolvers
+	// see normal *ResponsePath values via ResolveInfo.Path.
+	pathPage []ResponsePath
+	pathIdx  int
+}
+
+const (
+	pathPageInitSize = 16
+	pathPageMaxSize  = 256
+)
+
+// allocResponsePath returns a *ResponsePath populated with (prev, key),
+// drawn from the executionContext's slab. Functionally equivalent to
+// `prev.WithKey(key)` but amortizes the heap allocation.
+func (eCtx *executionContext) allocResponsePath(prev *ResponsePath, key interface{}) *ResponsePath {
+	if eCtx.pathIdx == len(eCtx.pathPage) {
+		next := len(eCtx.pathPage) * 2
+		if next < pathPageInitSize {
+			next = pathPageInitSize
+		} else if next > pathPageMaxSize {
+			next = pathPageMaxSize
+		}
+		eCtx.pathPage = make([]ResponsePath, next)
+		eCtx.pathIdx = 0
+	}
+	p := &eCtx.pathPage[eCtx.pathIdx]
+	eCtx.pathIdx++
+	p.Prev = prev
+	p.Key = key
+	return p
 }
 
 // argsMapPool recycles per-resolver argument maps. Acquired before

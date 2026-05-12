@@ -1,2 +1,11 @@
 .DS_Store
 .idea
+
+# Editor / agent state
+.claude/
+
+# Go test artifacts
+*.test
+coverage.out
+*.cpuprofile
+*.memprofile

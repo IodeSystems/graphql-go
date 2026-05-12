@@ -16,12 +16,8 @@ func NewDirective(dir *Directive) *Directive {
 	if dir == nil {
 		dir = &Directive{}
 	}
-	return &Directive{
-		Kind:      kinds.Directive,
-		Loc:       dir.Loc,
-		Name:      dir.Name,
-		Arguments: dir.Arguments,
-	}
+	dir.Kind = kinds.Directive
+	return dir
 }
 
 func (dir *Directive) GetKind() string {

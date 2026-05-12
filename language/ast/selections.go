@@ -56,12 +56,8 @@ func NewFragmentSpread(fs *FragmentSpread) *FragmentSpread {
 	if fs == nil {
 		fs = &FragmentSpread{}
 	}
-	return &FragmentSpread{
-		Kind:       kinds.FragmentSpread,
-		Loc:        fs.Loc,
-		Name:       fs.Name,
-		Directives: fs.Directives,
-	}
+	fs.Kind = kinds.FragmentSpread
+	return fs
 }
 
 func (fs *FragmentSpread) GetKind() string {
@@ -89,13 +85,8 @@ func NewInlineFragment(f *InlineFragment) *InlineFragment {
 	if f == nil {
 		f = &InlineFragment{}
 	}
-	return &InlineFragment{
-		Kind:          kinds.InlineFragment,
-		Loc:           f.Loc,
-		TypeCondition: f.TypeCondition,
-		Directives:    f.Directives,
-		SelectionSet:  f.SelectionSet,
-	}
+	f.Kind = kinds.InlineFragment
+	return f
 }
 
 func (f *InlineFragment) GetKind() string {

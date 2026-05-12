@@ -63,11 +63,8 @@ func NewIntValue(v *IntValue) *IntValue {
 	if v == nil {
 		v = &IntValue{}
 	}
-	return &IntValue{
-		Kind:  kinds.IntValue,
-		Loc:   v.Loc,
-		Value: v.Value,
-	}
+	v.Kind = kinds.IntValue
+	return v
 }
 
 func (v *IntValue) GetKind() string {
@@ -93,11 +90,8 @@ func NewFloatValue(v *FloatValue) *FloatValue {
 	if v == nil {
 		v = &FloatValue{}
 	}
-	return &FloatValue{
-		Kind:  kinds.FloatValue,
-		Loc:   v.Loc,
-		Value: v.Value,
-	}
+	v.Kind = kinds.FloatValue
+	return v
 }
 
 func (v *FloatValue) GetKind() string {
@@ -123,11 +117,8 @@ func NewStringValue(v *StringValue) *StringValue {
 	if v == nil {
 		v = &StringValue{}
 	}
-	return &StringValue{
-		Kind:  kinds.StringValue,
-		Loc:   v.Loc,
-		Value: v.Value,
-	}
+	v.Kind = kinds.StringValue
+	return v
 }
 
 func (v *StringValue) GetKind() string {
@@ -153,11 +144,8 @@ func NewBooleanValue(v *BooleanValue) *BooleanValue {
 	if v == nil {
 		v = &BooleanValue{}
 	}
-	return &BooleanValue{
-		Kind:  kinds.BooleanValue,
-		Loc:   v.Loc,
-		Value: v.Value,
-	}
+	v.Kind = kinds.BooleanValue
+	return v
 }
 
 func (v *BooleanValue) GetKind() string {
@@ -183,11 +171,8 @@ func NewEnumValue(v *EnumValue) *EnumValue {
 	if v == nil {
 		v = &EnumValue{}
 	}
-	return &EnumValue{
-		Kind:  kinds.EnumValue,
-		Loc:   v.Loc,
-		Value: v.Value,
-	}
+	v.Kind = kinds.EnumValue
+	return v
 }
 
 func (v *EnumValue) GetKind() string {
@@ -213,11 +198,8 @@ func NewListValue(v *ListValue) *ListValue {
 	if v == nil {
 		v = &ListValue{}
 	}
-	return &ListValue{
-		Kind:   kinds.ListValue,
-		Loc:    v.Loc,
-		Values: v.Values,
-	}
+	v.Kind = kinds.ListValue
+	return v
 }
 
 func (v *ListValue) GetKind() string {
@@ -249,11 +231,8 @@ func NewObjectValue(v *ObjectValue) *ObjectValue {
 	if v == nil {
 		v = &ObjectValue{}
 	}
-	return &ObjectValue{
-		Kind:   kinds.ObjectValue,
-		Loc:    v.Loc,
-		Fields: v.Fields,
-	}
+	v.Kind = kinds.ObjectValue
+	return v
 }
 
 func (v *ObjectValue) GetKind() string {
@@ -281,12 +260,8 @@ func NewObjectField(f *ObjectField) *ObjectField {
 	if f == nil {
 		f = &ObjectField{}
 	}
-	return &ObjectField{
-		Kind:  kinds.ObjectField,
-		Loc:   f.Loc,
-		Name:  f.Name,
-		Value: f.Value,
-	}
+	f.Kind = kinds.ObjectField
+	return f
 }
 
 func (f *ObjectField) GetKind() string {

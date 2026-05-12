@@ -53,11 +53,8 @@ func NewList(t *List) *List {
 	if t == nil {
 		t = &List{}
 	}
-	return &List{
-		Kind: kinds.List,
-		Loc:  t.Loc,
-		Type: t.Type,
-	}
+	t.Kind = kinds.List
+	return t
 }
 
 func (t *List) GetKind() string {
@@ -83,11 +80,8 @@ func NewNonNull(t *NonNull) *NonNull {
 	if t == nil {
 		t = &NonNull{}
 	}
-	return &NonNull{
-		Kind: kinds.NonNull,
-		Loc:  t.Loc,
-		Type: t.Type,
-	}
+	t.Kind = kinds.NonNull
+	return t
 }
 
 func (t *NonNull) GetKind() string {

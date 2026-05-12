@@ -87,16 +87,8 @@ func NewFragmentDefinition(fd *FragmentDefinition) *FragmentDefinition {
 	if fd == nil {
 		fd = &FragmentDefinition{}
 	}
-	return &FragmentDefinition{
-		Kind:                kinds.FragmentDefinition,
-		Loc:                 fd.Loc,
-		Operation:           fd.Operation,
-		Name:                fd.Name,
-		VariableDefinitions: fd.VariableDefinitions,
-		TypeCondition:       fd.TypeCondition,
-		Directives:          fd.Directives,
-		SelectionSet:        fd.SelectionSet,
-	}
+	fd.Kind = kinds.FragmentDefinition
+	return fd
 }
 
 func (fd *FragmentDefinition) GetKind() string {
@@ -159,11 +151,8 @@ func NewTypeExtensionDefinition(def *TypeExtensionDefinition) *TypeExtensionDefi
 	if def == nil {
 		def = &TypeExtensionDefinition{}
 	}
-	return &TypeExtensionDefinition{
-		Kind:       kinds.TypeExtensionDefinition,
-		Loc:        def.Loc,
-		Definition: def.Definition,
-	}
+	def.Kind = kinds.TypeExtensionDefinition
+	return def
 }
 
 func (def *TypeExtensionDefinition) GetKind() string {
@@ -200,14 +189,8 @@ func NewDirectiveDefinition(def *DirectiveDefinition) *DirectiveDefinition {
 	if def == nil {
 		def = &DirectiveDefinition{}
 	}
-	return &DirectiveDefinition{
-		Kind:        kinds.DirectiveDefinition,
-		Loc:         def.Loc,
-		Name:        def.Name,
-		Description: def.Description,
-		Arguments:   def.Arguments,
-		Locations:   def.Locations,
-	}
+	def.Kind = kinds.DirectiveDefinition
+	return def
 }
 
 func (def *DirectiveDefinition) GetKind() string {

@@ -50,12 +50,8 @@ func NewSchemaDefinition(def *SchemaDefinition) *SchemaDefinition {
 	if def == nil {
 		def = &SchemaDefinition{}
 	}
-	return &SchemaDefinition{
-		Kind:           kinds.SchemaDefinition,
-		Loc:            def.Loc,
-		Directives:     def.Directives,
-		OperationTypes: def.OperationTypes,
-	}
+	def.Kind = kinds.SchemaDefinition
+	return def
 }
 
 func (def *SchemaDefinition) GetKind() string {
@@ -90,12 +86,8 @@ func NewOperationTypeDefinition(def *OperationTypeDefinition) *OperationTypeDefi
 	if def == nil {
 		def = &OperationTypeDefinition{}
 	}
-	return &OperationTypeDefinition{
-		Kind:      kinds.OperationTypeDefinition,
-		Loc:       def.Loc,
-		Operation: def.Operation,
-		Type:      def.Type,
-	}
+	def.Kind = kinds.OperationTypeDefinition
+	return def
 }
 
 func (def *OperationTypeDefinition) GetKind() string {
@@ -119,13 +111,8 @@ func NewScalarDefinition(def *ScalarDefinition) *ScalarDefinition {
 	if def == nil {
 		def = &ScalarDefinition{}
 	}
-	return &ScalarDefinition{
-		Kind:        kinds.ScalarDefinition,
-		Loc:         def.Loc,
-		Description: def.Description,
-		Name:        def.Name,
-		Directives:  def.Directives,
-	}
+	def.Kind = kinds.ScalarDefinition
+	return def
 }
 
 func (def *ScalarDefinition) GetKind() string {
@@ -171,15 +158,8 @@ func NewObjectDefinition(def *ObjectDefinition) *ObjectDefinition {
 	if def == nil {
 		def = &ObjectDefinition{}
 	}
-	return &ObjectDefinition{
-		Kind:        kinds.ObjectDefinition,
-		Loc:         def.Loc,
-		Name:        def.Name,
-		Description: def.Description,
-		Interfaces:  def.Interfaces,
-		Directives:  def.Directives,
-		Fields:      def.Fields,
-	}
+	def.Kind = kinds.ObjectDefinition
+	return def
 }
 
 func (def *ObjectDefinition) GetKind() string {
@@ -225,15 +205,8 @@ func NewFieldDefinition(def *FieldDefinition) *FieldDefinition {
 	if def == nil {
 		def = &FieldDefinition{}
 	}
-	return &FieldDefinition{
-		Kind:        kinds.FieldDefinition,
-		Loc:         def.Loc,
-		Name:        def.Name,
-		Description: def.Description,
-		Arguments:   def.Arguments,
-		Type:        def.Type,
-		Directives:  def.Directives,
-	}
+	def.Kind = kinds.FieldDefinition
+	return def
 }
 
 func (def *FieldDefinition) GetKind() string {
@@ -263,15 +236,8 @@ func NewInputValueDefinition(def *InputValueDefinition) *InputValueDefinition {
 	if def == nil {
 		def = &InputValueDefinition{}
 	}
-	return &InputValueDefinition{
-		Kind:         kinds.InputValueDefinition,
-		Loc:          def.Loc,
-		Name:         def.Name,
-		Description:  def.Description,
-		Type:         def.Type,
-		DefaultValue: def.DefaultValue,
-		Directives:   def.Directives,
-	}
+	def.Kind = kinds.InputValueDefinition
+	return def
 }
 
 func (def *InputValueDefinition) GetKind() string {
@@ -300,14 +266,8 @@ func NewInterfaceDefinition(def *InterfaceDefinition) *InterfaceDefinition {
 	if def == nil {
 		def = &InterfaceDefinition{}
 	}
-	return &InterfaceDefinition{
-		Kind:        kinds.InterfaceDefinition,
-		Loc:         def.Loc,
-		Name:        def.Name,
-		Description: def.Description,
-		Directives:  def.Directives,
-		Fields:      def.Fields,
-	}
+	def.Kind = kinds.InterfaceDefinition
+	return def
 }
 
 func (def *InterfaceDefinition) GetKind() string {
@@ -352,14 +312,8 @@ func NewUnionDefinition(def *UnionDefinition) *UnionDefinition {
 	if def == nil {
 		def = &UnionDefinition{}
 	}
-	return &UnionDefinition{
-		Kind:        kinds.UnionDefinition,
-		Loc:         def.Loc,
-		Name:        def.Name,
-		Description: def.Description,
-		Directives:  def.Directives,
-		Types:       def.Types,
-	}
+	def.Kind = kinds.UnionDefinition
+	return def
 }
 
 func (def *UnionDefinition) GetKind() string {
@@ -404,14 +358,8 @@ func NewEnumDefinition(def *EnumDefinition) *EnumDefinition {
 	if def == nil {
 		def = &EnumDefinition{}
 	}
-	return &EnumDefinition{
-		Kind:        kinds.EnumDefinition,
-		Loc:         def.Loc,
-		Name:        def.Name,
-		Description: def.Description,
-		Directives:  def.Directives,
-		Values:      def.Values,
-	}
+	def.Kind = kinds.EnumDefinition
+	return def
 }
 
 func (def *EnumDefinition) GetKind() string {
@@ -455,13 +403,8 @@ func NewEnumValueDefinition(def *EnumValueDefinition) *EnumValueDefinition {
 	if def == nil {
 		def = &EnumValueDefinition{}
 	}
-	return &EnumValueDefinition{
-		Kind:        kinds.EnumValueDefinition,
-		Loc:         def.Loc,
-		Name:        def.Name,
-		Description: def.Description,
-		Directives:  def.Directives,
-	}
+	def.Kind = kinds.EnumValueDefinition
+	return def
 }
 
 func (def *EnumValueDefinition) GetKind() string {
@@ -490,14 +433,8 @@ func NewInputObjectDefinition(def *InputObjectDefinition) *InputObjectDefinition
 	if def == nil {
 		def = &InputObjectDefinition{}
 	}
-	return &InputObjectDefinition{
-		Kind:        kinds.InputObjectDefinition,
-		Loc:         def.Loc,
-		Name:        def.Name,
-		Description: def.Description,
-		Directives:  def.Directives,
-		Fields:      def.Fields,
-	}
+	def.Kind = kinds.InputObjectDefinition
+	return def
 }
 
 func (def *InputObjectDefinition) GetKind() string {

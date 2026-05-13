@@ -638,7 +638,6 @@ type FieldResolveAppendFn func(p ResolveParams, dst []byte) ([]byte, error)
 type ResolveInfo struct {
 	FieldName      string
 	FieldASTs      []*ast.Field
-	Path           *ResponsePath
 	ReturnType     Output
 	ParentType     Composite
 	Schema         Schema
@@ -1400,23 +1399,3 @@ func assertValidName(name string) error {
 
 }
 
-type ResponsePath struct {
-	Prev *ResponsePath
-	Key  interface{}
-}
-
-// WithKey returns a new responsePath containing the new key.
-func (p *ResponsePath) WithKey(key interface{}) *ResponsePath {
-	return &ResponsePath{
-		Prev: p,
-		Key:  key,
-	}
-}
-
-// AsArray returns an array of path keys.
-func (p *ResponsePath) AsArray() []interface{} {
-	if p == nil {
-		return nil
-	}
-	return append(p.Prev.AsArray(), p.Key)
-}

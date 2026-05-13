@@ -162,15 +162,16 @@ func ExecuteSubscription(p ExecuteParams) chan *Result {
 			}
 			return
 		}
-		fieldPath := &ResponsePath{
-			Key: responseName,
-		}
+		// Push the response key onto pathBuf so any error raised by
+		// the subscribe resolver gets the correct error envelope path.
+		// Single entry — subscription resolvers fire only at the top
+		// level, so there's no list-element nesting to track here.
+		exeContext.pathBuf = append(exeContext.pathBuf, pathEntry{key: responseName})
 
 		args := getArgumentValues(fieldDef.Args, fieldNode.Arguments, exeContext.VariableValues)
 		info := ResolveInfo{
 			FieldName:      fieldName,
 			FieldASTs:      fieldNodes,
-			Path:           fieldPath,
 			ReturnType:     fieldDef.Type,
 			ParentType:     operationType,
 			Schema:         p.Schema,

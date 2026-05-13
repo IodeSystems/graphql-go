@@ -91,8 +91,9 @@ type executionContext struct {
 
 	// pathBuf is the depth-stack for the response path. Entries are
 	// stored inline ([]pathEntry) to avoid per-element interface{}
-	// boxing. Used by the append-mode walker for error path
-	// reconstruction. ResolveInfo.Path is nil under append mode.
+	// boxing. Both walkers (ExecutePlan and ExecutePlanAppend) push
+	// on field/list-element entry and pop on exit. errorPathArray
+	// reconstructs the error envelope's `path` from this buffer.
 	pathBuf []pathEntry
 
 	// retainArgs mirrors !ExecuteParams.RetainArgs. When true (the
@@ -102,49 +103,11 @@ type executionContext struct {
 	// past the resolve call (struct fields, channels, goroutines).
 	poolArgs bool
 
-	// ResponsePath slab. The map-tree executor (ExecutePlan) allocates
-	// a fresh *ResponsePath per resolved field and per list element;
-	// the slab amortizes those into geometric-growth pages so
-	// wide/list-heavy queries pay one heap alloc per ~16-256 paths
-	// instead of one per path. Pages are never grown in place, so
-	// pointers handed out earlier remain valid for the lifetime of
-	// the response. Resolvers see normal *ResponsePath values via
-	// ResolveInfo.Path.
-	pathPage []ResponsePath
-	pathIdx  int
-
 	// thunkCount is incremented every time a resolver-returned func
 	// (a thunk) is wrapped by completePlannedValue. The dethunk pass
 	// only needs to run when this is > 0; for thunk-free schemas
 	// (the dominant shape) we skip the entire tree walk.
 	thunkCount int
-}
-
-const (
-	pathPageInitSize = 16
-	pathPageMaxSize  = 256
-)
-
-// allocResponsePath returns a *ResponsePath populated with (prev, key),
-// drawn from the executionContext's slab. Functionally equivalent to
-// `prev.WithKey(key)` but amortizes the heap allocation. Used by the
-// map-tree executor (ExecutePlan) for info.Path.
-func (eCtx *executionContext) allocResponsePath(prev *ResponsePath, key interface{}) *ResponsePath {
-	if eCtx.pathIdx == len(eCtx.pathPage) {
-		next := len(eCtx.pathPage) * 2
-		if next < pathPageInitSize {
-			next = pathPageInitSize
-		} else if next > pathPageMaxSize {
-			next = pathPageMaxSize
-		}
-		eCtx.pathPage = make([]ResponsePath, next)
-		eCtx.pathIdx = 0
-	}
-	p := &eCtx.pathPage[eCtx.pathIdx]
-	eCtx.pathIdx++
-	p.Prev = prev
-	p.Key = key
-	return p
 }
 
 // argsMapPool recycles per-resolver argument maps. Acquired before
@@ -188,13 +151,10 @@ func releaseArgsMap(m map[string]interface{}) {
 }
 
 // errorPathArray returns the response-path locator for an error
-// envelope. The map-tree executor (ExecutePlan) passes a non-nil
-// *ResponsePath which is walked via AsArray. The append-mode executor
-// passes nil and the path is reconstructed from pathBuf.
-func (eCtx *executionContext) errorPathArray(path *ResponsePath) []interface{} {
-	if path != nil {
-		return path.AsArray()
-	}
+// envelope. Both walkers (ExecutePlan and ExecutePlanAppend) push to
+// eCtx.pathBuf on field / list-element entry, so this is the single
+// source of truth for `errors[].path`.
+func (eCtx *executionContext) errorPathArray() []interface{} {
 	if len(eCtx.pathBuf) == 0 {
 		return nil
 	}
@@ -570,8 +530,8 @@ func getFieldEntryKey(node *ast.Field) string {
 	return ""
 }
 
-func handleFieldError(r interface{}, fieldNodes []ast.Node, path *ResponsePath, returnType Output, eCtx *executionContext) {
-	err := NewLocatedErrorWithPath(r, fieldNodes, eCtx.errorPathArray(path))
+func handleFieldError(r interface{}, fieldNodes []ast.Node, returnType Output, eCtx *executionContext) {
+	err := NewLocatedErrorWithPath(r, fieldNodes, eCtx.errorPathArray())
 	// send panic upstream
 	if _, ok := returnType.(*NonNull); ok {
 		panic(err)

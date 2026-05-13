@@ -700,7 +700,7 @@ func ExecutePlan(plan *Plan, p ExecuteParams) (result *Result) {
 			poolArgs:       !p.RetainArgs,
 		}
 
-		data := executePlannedSelection(eCtx, plan.root, p.Root, plan.rootType, nil)
+		data := executePlannedSelection(eCtx, plan.root, p.Root, plan.rootType)
 		// Mutations run serially with each field's result
 		// dethunked depth-first; queries run all then dethunk
 		// breadth-first. Skip the entire dethunk pass when no
@@ -735,7 +735,7 @@ func ExecutePlan(plan *Plan, p ExecuteParams) (result *Result) {
 // Mutation vs. query traversal is handled at the top level in
 // ExecutePlan via dethunkMapDepthFirst / dethunkMapWithBreadthFirstTraversal,
 // so this walker is the same for both.
-func executePlannedSelection(eCtx *executionContext, sp *selectionPlan, source interface{}, parentType *Object, path *ResponsePath) map[string]interface{} {
+func executePlannedSelection(eCtx *executionContext, sp *selectionPlan, source interface{}, parentType *Object) map[string]interface{} {
 	if sp == nil {
 		return map[string]interface{}{}
 	}
@@ -753,8 +753,13 @@ func executePlannedSelection(eCtx *executionContext, sp *selectionPlan, source i
 			// these but we match runtime behavior for safety.
 			continue
 		}
-		fieldPath := eCtx.allocResponsePath(path, fp.responseKey)
-		resolved, ok := resolvePlannedField(eCtx, parentType, source, fp, fieldPath)
+		// Push this field's response key for error-path reconstruction
+		// (handleFieldError → errorPathArray reads eCtx.pathBuf).
+		// Same pattern as writePlannedField in the append-mode walker.
+		pathDepth := len(eCtx.pathBuf)
+		eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{key: fp.responseKey})
+		resolved, ok := resolvePlannedField(eCtx, parentType, source, fp)
+		eCtx.pathBuf = eCtx.pathBuf[:pathDepth]
 		if !ok {
 			continue
 		}
@@ -768,11 +773,11 @@ func executePlannedSelection(eCtx *executionContext, sp *selectionPlan, source i
 // returnType. Pure-literal arguments skip getArgumentValues entirely;
 // variable-bearing args fall through to the existing per-request
 // coercion.
-func resolvePlannedField(eCtx *executionContext, parentType *Object, source interface{}, fp *fieldPlan, path *ResponsePath) (result interface{}, ok bool) {
+func resolvePlannedField(eCtx *executionContext, parentType *Object, source interface{}, fp *fieldPlan) (result interface{}, ok bool) {
 	var returnType Output
 	defer func() {
 		if r := recover(); r != nil {
-			handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), path, returnType, eCtx)
+			handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), returnType, eCtx)
 			ok = true
 		}
 	}()
@@ -815,7 +820,6 @@ func resolvePlannedField(eCtx *executionContext, parentType *Object, source inte
 	info := ResolveInfo{
 		FieldName:      fp.fieldName,
 		FieldASTs:      fp.fieldASTs,
-		Path:           path,
 		ReturnType:     returnType,
 		ParentType:     parentType,
 		Schema:         eCtx.Schema,
@@ -855,37 +859,48 @@ func resolvePlannedField(eCtx *executionContext, parentType *Object, source inte
 		panic(resolveFnError)
 	}
 
-	completed := completePlannedValueCatchingError(eCtx, returnType, fp, info, path, result)
+	completed := completePlannedValueCatchingError(eCtx, returnType, fp, info, result)
 	return completed, true
 }
 
-func completePlannedValueCatchingError(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}) (completed interface{}) {
+func completePlannedValueCatchingError(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, result interface{}) (completed interface{}) {
 	defer func() {
 		if r := recover(); r != nil {
-			handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), path, returnType, eCtx)
+			handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), returnType, eCtx)
 		}
 	}()
 	if rt, ok := returnType.(*NonNull); ok {
-		return completePlannedValue(eCtx, rt, fp, info, path, result)
+		return completePlannedValue(eCtx, rt, fp, info, result)
 	}
-	return completePlannedValue(eCtx, returnType, fp, info, path, result)
+	return completePlannedValue(eCtx, returnType, fp, info, result)
 }
 
-func completePlannedValue(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}) interface{} {
+func completePlannedValue(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, result interface{}) interface{} {
 	resultVal := reflect.ValueOf(result)
 	if resultVal.IsValid() && resultVal.Kind() == reflect.Func {
 		eCtx.thunkCount++
+		// Snapshot the pathBuf at thunk-creation time. Thunks are
+		// dethunked after the walker has already unwound past this
+		// field's push/pop, so without a snapshot, errors raised
+		// during dethunk land at the wrong response path. The walker
+		// dethunks single-threaded (depth-first for mutations,
+		// breadth-first for queries) so swap/restore on eCtx.pathBuf
+		// is safe — no concurrent reads to race with.
+		pathSnap := append([]pathEntry(nil), eCtx.pathBuf...)
 		return func() interface{} {
-			return completePlannedThunkValueCatchingError(eCtx, returnType, fp, info, path, result)
+			savedPath := eCtx.pathBuf
+			eCtx.pathBuf = pathSnap
+			defer func() { eCtx.pathBuf = savedPath }()
+			return completePlannedThunkValueCatchingError(eCtx, returnType, fp, info, result)
 		}
 	}
 	if rt, ok := returnType.(*NonNull); ok {
-		completed := completePlannedValue(eCtx, rt.OfType, fp, info, path, result)
+		completed := completePlannedValue(eCtx, rt.OfType, fp, info, result)
 		if completed == nil {
 			err := NewLocatedErrorWithPath(
 				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
 				FieldASTsToNodeASTs(fp.fieldASTs),
-				path.AsArray(),
+				eCtx.errorPathArray(),
 			)
 			panic(gqlerrors.FormatError(err))
 		}
@@ -895,7 +910,7 @@ func completePlannedValue(eCtx *executionContext, returnType Type, fp *fieldPlan
 		return nil
 	}
 	if rt, ok := returnType.(*List); ok {
-		return completePlannedListValue(eCtx, rt, fp, info, path, result)
+		return completePlannedListValue(eCtx, rt, fp, info, result)
 	}
 	if rt, ok := returnType.(*Scalar); ok {
 		return completeLeafValue(rt, result)
@@ -904,13 +919,13 @@ func completePlannedValue(eCtx *executionContext, returnType Type, fp *fieldPlan
 		return completeLeafValue(rt, result)
 	}
 	if rt, ok := returnType.(*Union); ok {
-		return completePlannedAbstractValue(eCtx, rt, fp, info, path, result)
+		return completePlannedAbstractValue(eCtx, rt, fp, info, result)
 	}
 	if rt, ok := returnType.(*Interface); ok {
-		return completePlannedAbstractValue(eCtx, rt, fp, info, path, result)
+		return completePlannedAbstractValue(eCtx, rt, fp, info, result)
 	}
 	if rt, ok := returnType.(*Object); ok {
-		return completePlannedObjectValue(eCtx, rt, fp, info, path, result)
+		return completePlannedObjectValue(eCtx, rt, fp, info, result)
 	}
 	err := invariantf(false, `Cannot complete value of unexpected type "%v."`, returnType)
 	if err != nil {
@@ -919,10 +934,10 @@ func completePlannedValue(eCtx *executionContext, returnType Type, fp *fieldPlan
 	return nil
 }
 
-func completePlannedThunkValueCatchingError(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}) (completed interface{}) {
+func completePlannedThunkValueCatchingError(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, result interface{}) (completed interface{}) {
 	defer func() {
 		if r := recover(); r != nil {
-			handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), path, returnType, eCtx)
+			handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), returnType, eCtx)
 		}
 	}()
 	propertyFn, ok := result.(func() (interface{}, error))
@@ -936,12 +951,12 @@ func completePlannedThunkValueCatchingError(eCtx *executionContext, returnType T
 	}
 	result = fnResult
 	if rt, ok := returnType.(*NonNull); ok {
-		return completePlannedValue(eCtx, rt, fp, info, path, result)
+		return completePlannedValue(eCtx, rt, fp, info, result)
 	}
-	return completePlannedValue(eCtx, returnType, fp, info, path, result)
+	return completePlannedValue(eCtx, returnType, fp, info, result)
 }
 
-func completePlannedListValue(eCtx *executionContext, returnType *List, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}) interface{} {
+func completePlannedListValue(eCtx *executionContext, returnType *List, fp *fieldPlan, info ResolveInfo, result interface{}) interface{} {
 	resultVal := reflect.ValueOf(result)
 	if resultVal.Kind() == reflect.Ptr {
 		resultVal = resultVal.Elem()
@@ -961,14 +976,18 @@ func completePlannedListValue(eCtx *executionContext, returnType *List, fp *fiel
 	completedResults := make([]interface{}, 0, resultVal.Len())
 	for i := 0; i < resultVal.Len(); i++ {
 		val := resultVal.Index(i).Interface()
-		fieldPath := eCtx.allocResponsePath(path, i)
-		completedItem := completePlannedValueCatchingError(eCtx, itemType, fp, info, fieldPath, val)
+		// Push the list index onto pathBuf for any error-path
+		// reporting under this item; pop after the item completes.
+		itemDepth := len(eCtx.pathBuf)
+		eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
+		completedItem := completePlannedValueCatchingError(eCtx, itemType, fp, info, val)
+		eCtx.pathBuf = eCtx.pathBuf[:itemDepth]
 		completedResults = append(completedResults, completedItem)
 	}
 	return completedResults
 }
 
-func completePlannedObjectValue(eCtx *executionContext, returnType *Object, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}) interface{} {
+func completePlannedObjectValue(eCtx *executionContext, returnType *Object, fp *fieldPlan, info ResolveInfo, result interface{}) interface{} {
 	if returnType.IsTypeOf != nil {
 		p := IsTypeOfParams{Value: result, Info: info, Context: eCtx.Context}
 		if !returnType.IsTypeOf(p) {
@@ -978,7 +997,7 @@ func completePlannedObjectValue(eCtx *executionContext, returnType *Object, fp *
 		}
 	}
 	if fp.sub != nil {
-		return executePlannedSelection(eCtx, fp.sub, result, returnType, path)
+		return executePlannedSelection(eCtx, fp.sub, result, returnType)
 	}
 	// Fallback: planner didn't precompute (e.g. selection set was
 	// empty per validation, which shouldn't reach here for object
@@ -986,7 +1005,7 @@ func completePlannedObjectValue(eCtx *executionContext, returnType *Object, fp *
 	return map[string]interface{}{}
 }
 
-func completePlannedAbstractValue(eCtx *executionContext, returnType Abstract, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}) interface{} {
+func completePlannedAbstractValue(eCtx *executionContext, returnType Abstract, fp *fieldPlan, info ResolveInfo, result interface{}) interface{} {
 	var runtimeType *Object
 	rtParams := ResolveTypeParams{Value: result, Info: info, Context: eCtx.Context}
 	if u, ok := returnType.(*Union); ok && u.ResolveType != nil {
@@ -1009,7 +1028,7 @@ func completePlannedAbstractValue(eCtx *executionContext, returnType Abstract, f
 		))
 	}
 	if sub, ok := fp.abstractAlternatives[runtimeType]; ok && sub != nil {
-		return executePlannedSelection(eCtx, sub, result, runtimeType, path)
+		return executePlannedSelection(eCtx, sub, result, runtimeType)
 	}
 	// Defensive fallback: unplanned concrete type (e.g. interface
 	// gained a new implementer between plan time and execute time —
@@ -1081,7 +1100,7 @@ func ExecutePlanAppend(plan *Plan, p ExecuteParams, dst []byte) ([]byte, []gqler
 				dst = append(dst, "null"...)
 			}
 		}()
-		dst = writePlannedSelection(eCtx, plan.root, p.Root, plan.rootType, nil, dst)
+		dst = writePlannedSelection(eCtx, plan.root, p.Root, plan.rootType, dst)
 	}()
 
 	if len(eCtx.Errors) > 0 {
@@ -1139,7 +1158,7 @@ func executePlanAppendViaResult(plan *Plan, p ExecuteParams, dst []byte) ([]byte
 // nested writes propagate; the nearest writeCompleteValueCatchingError
 // (or the ExecutePlanAppend top-level absorber) catches and rolls
 // back via its entry-length record.
-func writePlannedSelection(eCtx *executionContext, sp *selectionPlan, source interface{}, parentType *Object, path *ResponsePath, dst []byte) []byte {
+func writePlannedSelection(eCtx *executionContext, sp *selectionPlan, source interface{}, parentType *Object, dst []byte) []byte {
 	if sp == nil {
 		return append(dst, '{', '}')
 	}
@@ -1161,7 +1180,7 @@ func writePlannedSelection(eCtx *executionContext, sp *selectionPlan, source int
 			dst = append(dst, ',')
 		}
 		beforeField := len(dst)
-		dst = writePlannedField(eCtx, parentType, source, fp, path, dst)
+		dst = writePlannedField(eCtx, parentType, source, fp, dst)
 		if len(dst) == beforeField {
 			// Field declined to emit (defensive — writePlannedField
 			// always writes key+value or panics). Strip the comma we
@@ -1182,7 +1201,7 @@ func writePlannedSelection(eCtx *executionContext, sp *selectionPlan, source int
 // in eCtx.Errors, and `"responseKey":null` is emitted instead. For
 // NonNull fp.returnType the panic re-propagates (handleFieldError
 // re-panics) so the next nullable boundary above can absorb it.
-func writePlannedField(eCtx *executionContext, parentType *Object, source interface{}, fp *fieldPlan, path *ResponsePath, dst []byte) (out []byte) {
+func writePlannedField(eCtx *executionContext, parentType *Object, source interface{}, fp *fieldPlan, dst []byte) (out []byte) {
 	pathDepth := len(eCtx.pathBuf)
 	eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{key: fp.responseKey})
 	keyStart := len(dst)
@@ -1190,7 +1209,6 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	info := ResolveInfo{
 		FieldName:      fp.fieldName,
 		FieldASTs:      fp.fieldASTs,
-		Path:           nil,
 		ReturnType:     fp.returnType,
 		ParentType:     parentType,
 		Schema:         eCtx.Schema,
@@ -1294,7 +1312,7 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 	}
 
 	out = append(dst, fp.responseKeyJSON...)
-	out = writeCompleteValueCatchingError(eCtx, fp.returnType, fp, info, nil, result, out, -1)
+	out = writeCompleteValueCatchingError(eCtx, fp.returnType, fp, info, result, out, -1)
 	return out
 }
 
@@ -1309,11 +1327,11 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 // pushed by writeCompleteListValue). Pass -1 from sites that did not
 // push their own path key; the field-level pop is then left to
 // writePlannedField's recoverPlannedField.
-func writeCompleteValueCatchingError(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte, pathEntry int) (out []byte) {
+func writeCompleteValueCatchingError(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, result interface{}, dst []byte, pathEntry int) (out []byte) {
 	out = dst
 	entryLen := len(dst)
-	defer recoverCompleteValue(&out, entryLen, fp, path, returnType, eCtx, pathEntry)
-	out = writeCompleteValue(eCtx, returnType, fp, info, path, result, out, false)
+	defer recoverCompleteValue(&out, entryLen, fp, returnType, eCtx, pathEntry)
+	out = writeCompleteValue(eCtx, returnType, fp, info, result, out, false)
 	return out
 }
 
@@ -1335,7 +1353,7 @@ func recoverPlannedField(out *[]byte, keyStart int, fp *fieldPlan, eCtx *executi
 	}
 	defer func() { eCtx.pathBuf = eCtx.pathBuf[:pathEntry] }()
 	*out = (*out)[:keyStart]
-	handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), nil, fp.returnType, eCtx)
+	handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), fp.returnType, eCtx)
 	*out = append(*out, fp.responseKeyJSON...)
 	*out = append(*out, "null"...)
 }
@@ -1349,7 +1367,7 @@ func recoverPlannedField(out *[]byte, keyStart int, fp *fieldPlan, eCtx *executi
 // Pops the pathBuf depth-stack to pathEntry on the normal-return path
 // (r == nil). On the panic path, the pop is deferred so errorPathArray
 // can read the full path before it's truncated.
-func recoverCompleteValue(out *[]byte, entryLen int, fp *fieldPlan, path *ResponsePath, returnType Type, eCtx *executionContext, pathEntry int) {
+func recoverCompleteValue(out *[]byte, entryLen int, fp *fieldPlan, returnType Type, eCtx *executionContext, pathEntry int) {
 	r := recover()
 	if r == nil {
 		if pathEntry >= 0 {
@@ -1361,7 +1379,7 @@ func recoverCompleteValue(out *[]byte, entryLen int, fp *fieldPlan, path *Respon
 		defer func() { eCtx.pathBuf = eCtx.pathBuf[:pathEntry] }()
 	}
 	*out = (*out)[:entryLen]
-	handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), path, returnType, eCtx)
+	handleFieldError(r, FieldASTsToNodeASTs(fp.fieldASTs), returnType, eCtx)
 	*out = append(*out, "null"...)
 }
 
@@ -1371,7 +1389,7 @@ func recoverCompleteValue(out *[]byte, entryLen int, fp *fieldPlan, path *Respon
 // flag to distinguish "Serialize returned nil under NonNull"
 // (panic) from "Serialize returned nil under nullable" (emit
 // "null").
-func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte, nonNull bool) []byte {
+func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, info ResolveInfo, result interface{}, dst []byte, nonNull bool) []byte {
 	rv := reflect.ValueOf(result)
 	if rv.IsValid() && rv.Kind() == reflect.Func {
 		propertyFn, ok := result.(func() (interface{}, error))
@@ -1391,11 +1409,11 @@ func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, 
 			err := NewLocatedErrorWithPath(
 				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
 				FieldASTsToNodeASTs(fp.fieldASTs),
-				eCtx.errorPathArray(path),
+				eCtx.errorPathArray(),
 			)
 			panic(gqlerrors.FormatError(err))
 		}
-		return writeCompleteValue(eCtx, rt.OfType, fp, info, path, result, dst, true)
+		return writeCompleteValue(eCtx, rt.OfType, fp, info, result, dst, true)
 	}
 
 	if isNullish(result) {
@@ -1404,17 +1422,17 @@ func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, 
 
 	switch rt := returnType.(type) {
 	case *List:
-		return writeCompleteListValue(eCtx, rt, fp, info, path, result, dst)
+		return writeCompleteListValue(eCtx, rt, fp, info, result, dst)
 	case *Scalar:
-		return writeCompleteLeafValue(eCtx, rt, fp, info, path, result, dst, nonNull)
+		return writeCompleteLeafValue(eCtx, rt, fp, info, result, dst, nonNull)
 	case *Enum:
-		return writeCompleteLeafValue(eCtx, rt, fp, info, path, result, dst, nonNull)
+		return writeCompleteLeafValue(eCtx, rt, fp, info, result, dst, nonNull)
 	case *Object:
-		return writeCompleteObjectValue(eCtx, rt, fp, info, path, result, dst)
+		return writeCompleteObjectValue(eCtx, rt, fp, info, result, dst)
 	case *Interface:
-		return writeCompleteAbstractValue(eCtx, rt, fp, info, path, result, dst)
+		return writeCompleteAbstractValue(eCtx, rt, fp, info, result, dst)
 	case *Union:
-		return writeCompleteAbstractValue(eCtx, rt, fp, info, path, result, dst)
+		return writeCompleteAbstractValue(eCtx, rt, fp, info, result, dst)
 	}
 	if err := invariantf(false, `Cannot complete value of unexpected type "%v."`, returnType); err != nil {
 		panic(gqlerrors.FormatError(err))
@@ -1437,7 +1455,7 @@ func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, 
 // miss or a value the canonical path would null-out (Int overflow,
 // NaN/Inf float), control falls through to the generic path so the
 // existing spec-compliant behavior is preserved.
-func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte, nonNull bool) []byte {
+func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPlan, info ResolveInfo, result interface{}, dst []byte, nonNull bool) []byte {
 	switch t := fp.leafType.(type) {
 	case *Scalar:
 		switch t {
@@ -1484,7 +1502,7 @@ func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPl
 			err := NewLocatedErrorWithPath(
 				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
 				FieldASTsToNodeASTs(fp.fieldASTs),
-				eCtx.errorPathArray(path),
+				eCtx.errorPathArray(),
 			)
 			panic(gqlerrors.FormatError(err))
 		}
@@ -1499,7 +1517,7 @@ func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPl
 			err := NewLocatedErrorWithPath(
 				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
 				FieldASTsToNodeASTs(fp.fieldASTs),
-				eCtx.errorPathArray(path),
+				eCtx.errorPathArray(),
 			)
 			panic(gqlerrors.FormatError(err))
 		}
@@ -1517,7 +1535,7 @@ func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPl
 // bool, float64), the walker iterates with typed accessors to avoid
 // reflect.Value.Interface() boxing. Unknown or composite element
 // types fall back to the generic reflect path.
-func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte) []byte {
+func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldPlan, info ResolveInfo, result interface{}, dst []byte) []byte {
 	resultVal := reflect.ValueOf(result)
 	if resultVal.Kind() == reflect.Ptr {
 		resultVal = resultVal.Elem()
@@ -1552,7 +1570,7 @@ func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldP
 				val := resultVal.Index(i).String()
 				itemDepth := len(eCtx.pathBuf)
 				eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
-				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
+				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, val, dst, itemDepth)
 			}
 			return append(dst, ']')
 		case reflect.Int:
@@ -1564,7 +1582,7 @@ func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldP
 				val := int(resultVal.Index(i).Int())
 				itemDepth := len(eCtx.pathBuf)
 				eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
-				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
+				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, val, dst, itemDepth)
 			}
 			return append(dst, ']')
 		case reflect.Bool:
@@ -1576,7 +1594,7 @@ func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldP
 				val := resultVal.Index(i).Bool()
 				itemDepth := len(eCtx.pathBuf)
 				eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
-				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
+				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, val, dst, itemDepth)
 			}
 			return append(dst, ']')
 		case reflect.Float64:
@@ -1588,7 +1606,7 @@ func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldP
 				val := resultVal.Index(i).Float()
 				itemDepth := len(eCtx.pathBuf)
 				eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
-				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
+				dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, val, dst, itemDepth)
 			}
 			return append(dst, ']')
 		}
@@ -1603,12 +1621,12 @@ func writeCompleteListValue(eCtx *executionContext, returnType *List, fp *fieldP
 		val := resultVal.Index(i).Interface()
 		itemDepth := len(eCtx.pathBuf)
 		eCtx.pathBuf = append(eCtx.pathBuf, pathEntry{idx: i})
-		dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, nil, val, dst, itemDepth)
+		dst = writeCompleteValueCatchingError(eCtx, itemType, fp, info, val, dst, itemDepth)
 	}
 	return append(dst, ']')
 }
 
-func writeCompleteObjectValue(eCtx *executionContext, returnType *Object, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte) []byte {
+func writeCompleteObjectValue(eCtx *executionContext, returnType *Object, fp *fieldPlan, info ResolveInfo, result interface{}, dst []byte) []byte {
 	if returnType.IsTypeOf != nil {
 		p := IsTypeOfParams{Value: result, Info: info, Context: eCtx.Context}
 		if !returnType.IsTypeOf(p) {
@@ -1618,12 +1636,12 @@ func writeCompleteObjectValue(eCtx *executionContext, returnType *Object, fp *fi
 		}
 	}
 	if fp.sub != nil {
-		return writePlannedSelection(eCtx, fp.sub, result, returnType, path, dst)
+		return writePlannedSelection(eCtx, fp.sub, result, returnType, dst)
 	}
 	return append(dst, '{', '}')
 }
 
-func writeCompleteAbstractValue(eCtx *executionContext, returnType Abstract, fp *fieldPlan, info ResolveInfo, path *ResponsePath, result interface{}, dst []byte) []byte {
+func writeCompleteAbstractValue(eCtx *executionContext, returnType Abstract, fp *fieldPlan, info ResolveInfo, result interface{}, dst []byte) []byte {
 	var runtimeType *Object
 	rtParams := ResolveTypeParams{Value: result, Info: info, Context: eCtx.Context}
 	if u, ok := returnType.(*Union); ok && u.ResolveType != nil {
@@ -1646,7 +1664,7 @@ func writeCompleteAbstractValue(eCtx *executionContext, returnType Abstract, fp 
 		))
 	}
 	if sub, ok := fp.abstractAlternatives[runtimeType]; ok && sub != nil {
-		return writePlannedSelection(eCtx, sub, result, runtimeType, path, dst)
+		return writePlannedSelection(eCtx, sub, result, runtimeType, dst)
 	}
 	return append(dst, '{', '}')
 }

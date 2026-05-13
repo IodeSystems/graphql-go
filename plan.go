@@ -1269,7 +1269,17 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 			Context: eCtx.Context,
 		}, out)
 		if err != nil {
-			panic(gqlerrors.FormatError(err))
+			// Panic with the raw err so handleFieldError /
+			// NewLocatedErrorWithPath can wrap it in an *Error whose
+			// OriginalError is the resolver's typed error. FormatError
+			// downstream then sees the ExtendedError interface on the
+			// original and pulls Extensions through to the response
+			// envelope. Eagerly FormatError-ing here loses Extensions
+			// for typed errors that aren't *Error / FormattedError /
+			// ExtendedError-implementing concrete types (e.g. the
+			// gateway's *rejection — implements ExtendedError but isn't
+			// recognised by FormatError's default case).
+			panic(err)
 		}
 		return appended
 	}

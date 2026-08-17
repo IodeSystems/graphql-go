@@ -55,7 +55,7 @@ No linter, formatter, build step, or codegen. `go fmt` and `go vet` are the only
 ## Design Docs
 
 - `docs/plan.md` — detailed design doc for the append-mode execution pipeline (Phases 1–7). Read before modifying `plan.go`, `executor.go`, or the scalar emitters in `scalars.go`.
-- `UPSTREAM.md` — how far `graphql-go/graphql` has been absorbed, the sync procedure, and the list of upstream commits deliberately not taken. Read before pulling from `upstream`; update it in the same pass as any sync.
+- `UPSTREAM.md` — how far `graphql-go/graphql` has been absorbed, the sync procedure, this fork's divergence points, and the open-PR triage. Per-commit decisions live in `upstream.jsonl`; `bin/upstream` reads it. Read before pulling from `upstream`, and record decisions in the same pass as any sync.
 
 ## CI
 

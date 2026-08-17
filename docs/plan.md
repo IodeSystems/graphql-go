@@ -17,7 +17,7 @@ the record.
 ## Why this exists
 
 The plan cache eliminated per-request parse + validate + plan. What's
-left in `ExecutePlan` (`plan.go:545`) is the inherently-per-request
+left in `ExecutePlan` (in `plan.go`) is the inherently-per-request
 work: walking the plan, resolving fields, building a result tree.
 That tree is `map[string]interface{}` with `interface{}` boxing on
 every scalar, allocated fresh per request at every object level. The
@@ -72,7 +72,7 @@ between streaming and buffered.
 
 ### Plan-time additions
 
-Two new fields on `fieldPlan` (`plan.go:51`), both populated in
+Two new fields on `fieldPlan` (in `plan.go`), both populated in
 `PlanQuery`:
 
 ```go
@@ -332,6 +332,19 @@ Exceeded the predicted 5–10 % CPU because the String Sprintf alloc
 was bigger than the alloc profile read suggested.
 
 ### Phase 4 — Lazy `ResponsePath` (default-on; `PreserveInfoPath` opt-out)
+
+> **Superseded by 682320e.** This phase shipped a lazy depth-stack path
+> with `ExecuteParams.PreserveInfoPath` as the escape hatch back to
+> populated `info.Path`. That escape hatch is gone: 682320e removed
+> `ResolveInfo.Path` and the `ResponsePath` type outright, and with them
+> the `PreserveInfoPath` flag, the `lazyPath` branch, `popPath`, and the
+> `BenchmarkPlannedAppendEager_*` siblings. `eCtx.pathBuf` and
+> `errorPathArray` survive and are now the only path machinery — both
+> walkers use them, and `errors[].path` is still spec-correct.
+>
+> The section is kept for the reasoning behind the depth-stack design,
+> not as a description of the current API. Nothing named
+> `PreserveInfoPath` exists to set.
 
 **Optimization policy:** new perf knobs ship **fast by default** with
 an opt-out flag callers can flip when the underlying contract isn't
@@ -646,10 +659,10 @@ perf docs.
 | `plan_append_test.go` | 1 | Cross-run parity helper + coverage matrix. | landed |
 | `plan.go` | 2 | Hoist `&info` into the extensions slow-path branch; open-code the per-field recover (was scoped as `ResolveParams` + args-map pools; pivoted — see Phase 2). | landed |
 | `plan.go` | 3 | Inline canonical-Go-type fast path in `writeCompleteLeafValue` for `String` / `ID` / `Int` / `Float` / `Boolean`. | landed |
-| `executor.go` | 4 | Add `ExecuteParams.PreserveInfoPath` (opt-out); add `lazyPath` / `pathBuf` to `executionContext`; add `popPath` / `errorPathArray` helpers; route `handleFieldError` through `errorPathArray`. | landed |
-| `plan.go` | 4 | Branch on `eCtx.lazyPath` at `writePlannedField` + `writeCompleteListValue` push sites; thread `pathEntry` through `recoverPlannedField` / `recoverCompleteValue` for the unwind. Default-on; `PreserveInfoPath=true` restores legacy behavior. | landed |
-| `plan_append_test.go` | 4 | `runParity` cross-runs `PreserveInfoPath=true`; dedicated tests pin `info.Path` contract and error-location parity. | landed |
-| `plan_bench_test.go` | 4 | `BenchmarkPlannedAppendEager_*` siblings (PreserveInfoPath=true) measure opt-out cost. | landed |
+| `executor.go` | 4 | Add `ExecuteParams.PreserveInfoPath` (opt-out); add `lazyPath` / `pathBuf` to `executionContext`; add `popPath` / `errorPathArray` helpers; route `handleFieldError` through `errorPathArray`. | landed; flag, `lazyPath` and `popPath` later removed by 682320e |
+| `plan.go` | 4 | Branch on `eCtx.lazyPath` at `writePlannedField` + `writeCompleteListValue` push sites; thread `pathEntry` through `recoverPlannedField` / `recoverCompleteValue` for the unwind. | landed; branch removed by 682320e, the push sites are now unconditional |
+| `plan_append_test.go` | 4 | `runParity` cross-runs `PreserveInfoPath=true`; dedicated tests pin `info.Path` contract and error-location parity. | landed; cross-run and `info.Path` tests dropped with 682320e, error-location parity retained |
+| `plan_bench_test.go` | 4 | `BenchmarkPlannedAppendEager_*` siblings (PreserveInfoPath=true) measure opt-out cost. | landed; removed by 682320e with the flag |
 | `executor.go` | 5 | Add `ExecuteParams.ConcurrentThunks` (opt-out). | landed |
 | `plan.go` | 5 | `executePlanAppendViaResult` delegate that runs `ExecutePlan` + `json.Marshal` when the caller opts back into the breadth-first dethunk pass. | landed |
 | `plan_append_test.go` | 5 | `TestAppendConcurrentThunks` exercises the thunk path and cross-checks default-mode (eager) parity. | landed |

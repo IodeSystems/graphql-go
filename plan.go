@@ -1360,7 +1360,7 @@ func writePlannedField(eCtx *executionContext, parentType *Object, source interf
 // `null` emission here (and an error recorded), NonNull returnType
 // re-panics for the parent to absorb.
 //
-// pathEntry is the lazyPath depth captured before any push that the
+// pathEntry is the eCtx.pathBuf depth captured before any push that the
 // caller wants this absorber to clean up (e.g. the per-item index
 // pushed by writeCompleteListValue). Pass -1 from sites that did not
 // push their own path key; the field-level pop is then left to

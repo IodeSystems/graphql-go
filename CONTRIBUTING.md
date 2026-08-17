@@ -52,17 +52,18 @@ The basics are as follows:
 
 1. Fork the project via the GitHub UI
 
-2. `go get` the upstream repo and set it up as the `upstream` remote and your own repo as the `origin` remote:
+2. Clone your fork and add `graphql-go/graphql` as the `upstream` remote:
 
 ```bash
-$ go get github.com/graphql-go/graphql
-$ cd $GOPATH/src/github.com/graphql-go/graphql
-$ git remote rename origin upstream
-$ git remote add origin git@github.com/YOUR_GITHUB_NAME/graphql
+$ git clone git@github.com:YOUR_GITHUB_NAME/graphql-go.git
+$ cd graphql-go
+$ git remote add upstream git@github.com:graphql-go/graphql.git
 ```
-All import paths should now work fine assuming that you've got the
-proper branch checked out.
 
+This is the IodeSystems fork; the module path is
+`github.com/IodeSystems/graphql-go`, and the `upstream` remote points at
+`graphql-go/graphql`. See `UPSTREAM.md` for how changes are synced between
+the two.
 
 ## Landing Pull Requests
 (This is for committers only. If you are unsure whether you are a committer, you are not.)

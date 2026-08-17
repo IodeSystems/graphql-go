@@ -582,10 +582,11 @@ type FieldResolver interface {
 
 // defaultResolveCache memoizes the struct-field walk done by
 // DefaultResolveFn on its first hit for a given (struct type, GraphQL
-// field name) pair. Value is the matching struct field index, or -1 if
-// no field matched. Skips per-call NumField iteration, per-field
-// strings.EqualFold + Tag.Get + strings.Split, and the per-field
-// closure allocation in the original loop.
+// field name) pair. Value is the index path to the matching field
+// (see resolveDefaultStructField), or nil if no field matched. Skips
+// per-call NumField iteration, per-field strings.EqualFold + Tag.Get +
+// strings.Split, and the per-field closure allocation in the original
+// loop.
 //
 // reflect.Type identity is stable for a given Go type, so the cache
 // never invalidates. Bounded in practice by (distinct source struct
@@ -600,28 +601,120 @@ type defaultResolveKey struct {
 // resolveDefaultStructField runs DefaultResolveFn's struct-field
 // matching rules (case-insensitive Go field name, then `json` tag,
 // then `graphql` tag — first match wins, scanning in declaration
-// order), caching the resolved index. -1 means no field on sourceType
-// matches fieldName.
-func resolveDefaultStructField(sourceType reflect.Type, fieldName string) int {
+// order) and returns the index path to the match, suitable for
+// fieldByIndexPath. nil means no field on sourceType matches
+// fieldName.
+//
+// Fields promoted from embedded structs are matched using Go's own
+// promotion rules: shallower depths win outright, and a tie between
+// two branches at the same depth is ambiguous and matches nothing —
+// the same answer a plain sourceVal.FieldName selector would give.
+// Searching breadth-first is what makes that work; a depth-first walk
+// would let a deeply embedded field shadow a shallower one purely by
+// declaration order.
+func resolveDefaultStructField(sourceType reflect.Type, fieldName string) []int {
 	key := defaultResolveKey{t: sourceType, n: fieldName}
 	if cached, ok := defaultResolveCache.Load(key); ok {
-		return cached.(int)
+		path, _ := cached.([]int)
+		return path
 	}
-	idx := -1
-	for i := 0; i < sourceType.NumField(); i++ {
-		typeField := sourceType.Field(i)
-		if strings.EqualFold(typeField.Name, fieldName) {
-			idx = i
-			break
+	path := searchDefaultStructField(sourceType, fieldName)
+	defaultResolveCache.Store(key, path)
+	return path
+}
+
+// structLevel is one breadth-first frontier entry: a struct type and
+// the index path that reaches it from the root struct.
+type structLevel struct {
+	typ  reflect.Type
+	path []int
+}
+
+// searchDefaultStructField is resolveDefaultStructField's uncached
+// body. Kept separate so the cache stores whatever this returns,
+// including a nil "no match".
+func searchDefaultStructField(sourceType reflect.Type, fieldName string) []int {
+	level := []structLevel{{typ: sourceType}}
+	// Recursive embeddings (type T struct{ *T }) would otherwise loop
+	// forever; a type only needs visiting at its shallowest depth.
+	visited := map[reflect.Type]bool{sourceType: true}
+
+	for len(level) > 0 {
+		var match []int
+		matches := 0
+		var next []structLevel
+
+		for _, cur := range level {
+			found := -1
+			for i := 0; i < cur.typ.NumField(); i++ {
+				typeField := cur.typ.Field(i)
+				if strings.EqualFold(typeField.Name, fieldName) ||
+					tagFirstSegmentEquals(typeField.Tag.Get("json"), fieldName) ||
+					tagFirstSegmentEquals(typeField.Tag.Get("graphql"), fieldName) {
+					found = i
+					break
+				}
+				if typeField.Anonymous {
+					et := typeField.Type
+					if et.Kind() == reflect.Ptr {
+						et = et.Elem()
+					}
+					if et.Kind() == reflect.Struct && !visited[et] {
+						next = append(next, structLevel{
+							typ:  et,
+							path: appendIndex(cur.path, i),
+						})
+					}
+				}
+			}
+			if found >= 0 {
+				matches++
+				if matches > 1 {
+					// Ambiguous at this depth: Go would refuse to
+					// promote either, so neither is a match.
+					return nil
+				}
+				match = appendIndex(cur.path, found)
+			}
 		}
-		if tagFirstSegmentEquals(typeField.Tag.Get("json"), fieldName) ||
-			tagFirstSegmentEquals(typeField.Tag.Get("graphql"), fieldName) {
-			idx = i
-			break
+		if matches == 1 {
+			return match
 		}
+		for _, n := range next {
+			visited[n.typ] = true
+		}
+		level = next
 	}
-	defaultResolveCache.Store(key, idx)
-	return idx
+	return nil
+}
+
+// appendIndex returns path + [i] without aliasing path's backing array
+// — sibling frontier entries share a prefix and must not overwrite
+// each other.
+func appendIndex(path []int, i int) []int {
+	out := make([]int, len(path)+1)
+	copy(out, path)
+	out[len(path)] = i
+	return out
+}
+
+// fieldByIndexPath walks an index path produced by
+// resolveDefaultStructField. Unlike reflect.Value.FieldByIndex it does
+// not panic when the path crosses a nil embedded pointer; it returns
+// the zero Value, which the caller reports as a null field.
+func fieldByIndexPath(v reflect.Value, path []int) reflect.Value {
+	for n, i := range path {
+		if n > 0 {
+			if v.Kind() == reflect.Ptr {
+				if v.IsNil() {
+					return reflect.Value{}
+				}
+				v = v.Elem()
+			}
+		}
+		v = v.Field(i)
+	}
+	return v
 }
 
 // tagFirstSegmentEquals reports whether the first comma-separated
@@ -656,11 +749,16 @@ func DefaultResolveFn(p ResolveParams) (interface{}, error) {
 	}
 
 	if sourceVal.Type().Kind() == reflect.Struct {
-		idx := resolveDefaultStructField(sourceVal.Type(), p.Info.FieldName)
-		if idx < 0 {
+		path := resolveDefaultStructField(sourceVal.Type(), p.Info.FieldName)
+		if path == nil {
 			return nil, nil
 		}
-		return sourceVal.Field(idx).Interface(), nil
+		field := fieldByIndexPath(sourceVal, path)
+		if !field.IsValid() {
+			// Path crossed a nil embedded pointer.
+			return nil, nil
+		}
+		return field.Interface(), nil
 	}
 
 	// try p.Source as a map[string]interface

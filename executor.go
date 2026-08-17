@@ -482,7 +482,7 @@ func doesFragmentConditionMatch(eCtx *executionContext, fragment ast.Node, ttype
 			return true
 		}
 		conditionalType, err := typeFromAST(eCtx.Schema, typeConditionAST)
-		if err != nil {
+		if err != nil || conditionalType == nil {
 			return false
 		}
 		if conditionalType == ttype {
@@ -503,7 +503,7 @@ func doesFragmentConditionMatch(eCtx *executionContext, fragment ast.Node, ttype
 			return true
 		}
 		conditionalType, err := typeFromAST(eCtx.Schema, typeConditionAST)
-		if err != nil {
+		if err != nil || conditionalType == nil {
 			return false
 		}
 		if conditionalType == ttype {

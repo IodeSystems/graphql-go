@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""bin/upstream — triage upstream commits this fork has not decided on.
+
+Lists non-merge commits on `upstream/master` that are newer than the last
+sync point and carry no entry in upstream.jsonl. What remains is the work
+queue: commits nobody has yet judged.
+
+The sync point is `git merge-base HEAD upstream/master`, so it needs no
+bookkeeping of its own. That matters because the gap is normally closed
+with `git merge -s ours upstream/master` (see UPSTREAM.md): after that
+merge, `HEAD..upstream/master` is empty even for commits whose content was
+never taken, so ancestry alone cannot answer "what is left to decide".
+The merge-base still moves to the sync point, and upstream.jsonl still
+records why each commit was taken or refused.
+
+Usage:
+  bin/upstream                    # undecided commits (the work queue)
+  bin/upstream --all              # every commit since the sync point, with status
+  bin/upstream --ledger           # every upstream.jsonl entry, newest first
+  bin/upstream --check            # exit 1 if anything is undecided or malformed
+  bin/upstream --json             # machine-readable, composes with the above
+  bin/upstream record <hash> <status> <rationale>   # append an entry
+  bin/upstream record <hash> <status> <rationale> --local <sha>
+
+Statuses:
+  absorbed  content is in this fork (via cherry-pick, or fixed independently)
+  skipped   deliberately not taken; rationale must say why
+  net-zero  upstream reverted it, or it cancels against another commit
+
+Environment:
+  UPSTREAM_REMOTE  remote to compare against (default: upstream)
+  UPSTREAM_BRANCH  branch on that remote (default: master)
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+STATUSES = ("absorbed", "skipped", "net-zero")
+
+REPO = subprocess.run(
+    ["git", "rev-parse", "--show-toplevel"],
+    capture_output=True, text=True, check=True,
+).stdout.strip()
+LEDGER = os.path.join(REPO, "upstream.jsonl")
+REMOTE = os.environ.get("UPSTREAM_REMOTE", "upstream")
+BRANCH = os.environ.get("UPSTREAM_BRANCH", "master")
+REF = f"{REMOTE}/{BRANCH}"
+
+
+def die(msg, code=2):
+    print(f"upstream: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def git(*args, check=True):
+    r = subprocess.run(["git", "-C", REPO, *args], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        die(f"git {' '.join(args)}: {r.stderr.strip()}")
+    return r.stdout.strip()
+
+
+def resolve(rev):
+    """Full SHA for rev, or None if it does not exist here."""
+    r = subprocess.run(
+        ["git", "-C", REPO, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    return r.stdout.strip() or None
+
+
+def load_ledger():
+    """Ledger entries plus any malformed-line complaints, in file order."""
+    entries, problems = [], []
+    if not os.path.exists(LEDGER):
+        return entries, problems
+    with open(LEDGER) as fh:
+        for n, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError as exc:
+                problems.append(f"{LEDGER}:{n}: invalid JSON ({exc.msg})")
+                continue
+            missing = [k for k in ("hash", "status", "rationale") if not e.get(k)]
+            if missing:
+                problems.append(f"{LEDGER}:{n}: missing {', '.join(missing)}")
+                continue
+            if e["status"] not in STATUSES:
+                problems.append(
+                    f"{LEDGER}:{n}: unknown status {e['status']!r}"
+                    f" (want one of: {', '.join(STATUSES)})"
+                )
+                continue
+            full = resolve(e["hash"])
+            if full is None:
+                # Not fatal for listing: the commit may predate a shallow
+                # clone or live on a remote this checkout lacks. --check
+                # reports it so typos do not silently match nothing.
+                problems.append(f"{LEDGER}:{n}: {e['hash']} not found in this repo")
+            e["_full"] = full
+            e["_line"] = n
+            entries.append(e)
+    return entries, problems
+
+
+def commits_since_sync():
+    """Non-merge upstream commits newer than the sync point, newest first."""
+    if resolve(REF) is None:
+        die(f"{REF} not found — is the '{REMOTE}' remote configured and fetched?")
+    base = git("merge-base", "HEAD", REF)
+    out = git(
+        "log", "--no-merges", "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s",
+        f"{base}..{REF}",
+    )
+    rows = []
+    for line in out.splitlines():
+        if not line:
+            continue
+        full, short, author, date, subject = line.split("\x1f", 4)
+        rows.append(
+            {"hash": full, "short": short, "author": author,
+             "date": date[:10], "subject": subject}
+        )
+    return base, rows
+
+
+def decorate(rows, entries):
+    by_full = {e["_full"]: e for e in entries if e.get("_full")}
+    for r in rows:
+        e = by_full.get(r["hash"])
+        r["entry"] = e
+        r["status"] = e["status"] if e else None
+    return rows
+
+
+def print_table(rows, show_status):
+    if not rows:
+        return
+    w = max(len(r["short"]) for r in rows)
+    for r in rows:
+        cols = [r["short"].ljust(w), r["date"]]
+        if show_status:
+            cols.append((r["status"] or "UNDECIDED").ljust(9))
+        cols.append(r["subject"])
+        print("  ".join(cols))
+        e = r.get("entry")
+        if show_status and e:
+            local = f" -> {e['local']}" if e.get("local") else ""
+            print(" " * (w + 14) + f"{e['rationale']}{local}")
+
+
+def cmd_record(argv):
+    local = None
+    if "--local" in argv:
+        i = argv.index("--local")
+        if i + 1 >= len(argv):
+            die("--local needs a value")
+        local = argv[i + 1]
+        argv = argv[:i] + argv[i + 2:]
+    if len(argv) < 3:
+        die("usage: bin/upstream record <hash> <status> <rationale> [--local <sha>]")
+    ref, status, rationale = argv[0], argv[1], " ".join(argv[2:])
+    if status not in STATUSES:
+        die(f"unknown status {status!r} (want one of: {', '.join(STATUSES)})")
+    full = resolve(ref)
+    if full is None:
+        die(f"{ref} not found in this repo — fetch {REMOTE} first, or check the hash")
+
+    entries, _ = load_ledger()
+    for e in entries:
+        if e.get("_full") == full:
+            die(
+                f"{ref} already recorded as {e['status']} "
+                f"at {LEDGER}:{e['_line']} — edit that line instead"
+            )
+
+    short = git("rev-parse", "--short", full)
+    subject = git("log", "-1", "--format=%s", full)
+    rec = {"hash": short, "subject": subject, "status": status, "rationale": rationale}
+    if local:
+        lf = resolve(local)
+        if lf is None:
+            die(f"--local {local} not found in this repo")
+        rec["local"] = git("rev-parse", "--short", lf)
+    # Newline-terminate defensively: an earlier hand-edit may have dropped
+    # the trailing newline, which would otherwise splice two records.
+    needs_nl = (
+        os.path.exists(LEDGER)
+        and os.path.getsize(LEDGER) > 0
+        and open(LEDGER, "rb").read()[-1:] != b"\n"
+    )
+    with open(LEDGER, "a") as fh:
+        if needs_nl:
+            fh.write("\n")
+        fh.write(json.dumps(rec) + "\n")
+    print(f"recorded {short} as {status}")
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] == "record":
+        return cmd_record(argv[1:])
+
+    if "--help" in argv or "-h" in argv:
+        print(__doc__.strip())
+        return
+
+    as_json = "--json" in argv
+    argv = [a for a in argv if a != "--json"]
+    mode = argv[0] if argv else ""
+    if mode not in ("", "--all", "--check", "--ledger"):
+        die(f"unknown option {mode!r} — see bin/upstream --help")
+
+    entries, problems = load_ledger()
+
+    if mode == "--ledger":
+        rows = sorted(entries, key=lambda e: e["_line"], reverse=True)
+        if as_json:
+            print(json.dumps([{k: v for k, v in e.items()
+                               if not k.startswith("_")} for e in rows], indent=2))
+        else:
+            for e in rows:
+                local = f" -> {e['local']}" if e.get("local") else ""
+                print(f"{e['hash']:<10} {e['status']:<9} {e.get('subject', '')}")
+                print(f"{'':<10} {e['rationale']}{local}")
+        return
+
+    base, rows = commits_since_sync()
+    decorate(rows, entries)
+    undecided = [r for r in rows if r["status"] is None]
+
+    if as_json:
+        payload = {
+            "ref": REF,
+            "syncPoint": git("rev-parse", "--short", base),
+            "commits": [
+                {k: r[k] for k in ("hash", "short", "author", "date", "subject")}
+                | {"status": r["status"],
+                   "rationale": (r["entry"] or {}).get("rationale")}
+                for r in (rows if mode == "--all" else undecided)
+            ],
+            "problems": problems,
+        }
+        print(json.dumps(payload, indent=2))
+    elif mode == "--all":
+        print(f"{REF} since sync point {git('rev-parse', '--short', base)}: "
+              f"{len(rows)} commits, {len(undecided)} undecided")
+        print()
+        print_table(rows, show_status=True)
+    else:
+        if not undecided:
+            print(f"Nothing to triage. {REF} is decided through "
+                  f"{git('rev-parse', '--short', base)}.")
+        else:
+            print(f"{len(undecided)} undecided commit(s) on {REF} "
+                  f"since {git('rev-parse', '--short', base)}:")
+            print()
+            print_table(undecided, show_status=False)
+            print()
+            print("Record a decision with:")
+            print("  bin/upstream record <hash> <absorbed|skipped|net-zero> <rationale>")
+
+    for p in problems:
+        print(f"upstream: {p}", file=sys.stderr)
+
+    if mode == "--check" and (undecided or problems):
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

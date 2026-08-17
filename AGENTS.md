@@ -11,6 +11,7 @@ go test -race ./...        # race detector (CI runs this for coverage)
 go vet ./...               # static analysis (CI runs after tests)
 go test -bench=. -benchmem # benchmarks (requires -bench flag)
 bin/perf                   # compare benchmarks between two git refs, updates README
+bin/upstream               # upstream commits not yet triaged (see UPSTREAM.md)
 ```
 
 No linter, formatter, build step, or codegen. `go fmt` and `go vet` are the only style gates (per CONTRIBUTING.md).

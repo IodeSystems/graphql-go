@@ -36,9 +36,32 @@ func init() {
 	}
 }
 
+// DefaultMaxDepth bounds how deeply the parser will nest before giving
+// up. The parser descends one Go stack frame per nesting level, and a
+// stack overflow in Go is a fatal runtime error that recover cannot
+// catch — a deep enough document kills the process rather than failing
+// the request. Overflow needs roughly three million levels here (a ~6 MB
+// document), so any server accepting request bodies that large is
+// exposed without this cap.
+//
+// The limit counts *nesting*, not size: sibling fields, list elements
+// and object fields are parsed in a loop and cost no depth at all. A
+// query selecting a million fields side by side is unaffected; only
+// descent counts.
+//
+// 1000 is far above any hand-written or generated document — deeply
+// nested Relay or federation queries run to tens of levels, not
+// hundreds — and far below the level that threatens the stack.
+const DefaultMaxDepth = 1000
+
 type ParseOptions struct {
 	NoLocation bool
 	NoSource   bool
+
+	// MaxDepth caps nesting depth. Zero selects DefaultMaxDepth; a
+	// negative value disables the check, which is only safe when the
+	// document is trusted.
+	MaxDepth int
 }
 
 type ParseParams struct {
@@ -51,6 +74,11 @@ type Parser struct {
 	Options ParseOptions
 	PrevEnd int
 	Token   lexer.Token
+
+	// depth is the current nesting level; maxDepth is the resolved limit
+	// (ParseOptions.MaxDepth, or DefaultMaxDepth when unset). See enter.
+	depth    int
+	maxDepth int
 
 	// Slab-allocated AST nodes: pages amortize per-node heap allocations.
 	// Page sizes grow geometrically (init -> max) to keep small parses cheap.
@@ -163,12 +191,35 @@ func makeParser(s *source.Source, opts ParseOptions) (*Parser, error) {
 	if err != nil {
 		return &Parser{}, err
 	}
+	maxDepth := opts.MaxDepth
+	if maxDepth == 0 {
+		maxDepth = DefaultMaxDepth
+	}
 	return &Parser{
-		Source:  s,
-		Options: opts,
-		PrevEnd: 0,
-		Token:   token,
+		Source:   s,
+		Options:  opts,
+		PrevEnd:  0,
+		Token:    token,
+		maxDepth: maxDepth,
 	}, nil
+}
+
+// enter records descent into one nesting level, failing once the
+// document nests past maxDepth. Every recursive parse path funnels
+// through it: selection sets, list values, input-object values and list
+// types each recurse independently, so a cap on only one of them leaves
+// the others able to exhaust the stack. Callers must pair it with leave.
+func (parser *Parser) enter() error {
+	parser.depth++
+	if parser.maxDepth > 0 && parser.depth > parser.maxDepth {
+		return gqlerrors.NewSyntaxError(parser.Source, parser.Token.Start,
+			fmt.Sprintf("Document nests deeper than %d levels", parser.maxDepth))
+	}
+	return nil
+}
+
+func (parser *Parser) leave() {
+	parser.depth--
 }
 
 /* Implements the parsing rules in the Document section. */
@@ -375,6 +426,10 @@ func parseVariable(parser *Parser) (*ast.Variable, error) {
  * SelectionSet : { Selection+ }
  */
 func parseSelectionSet(parser *Parser) (*ast.SelectionSet, error) {
+	if err := parser.enter(); err != nil {
+		return nil, err
+	}
+	defer parser.leave()
 	start := parser.Token.Start
 	openTok, err := expect(parser, lexer.BRACE_L)
 	if err != nil {
@@ -721,6 +776,10 @@ func parseConstValue(parser *Parser) (interface{}, error) {
  *   - [ Value[?Const]+ ]
  */
 func parseList(parser *Parser, isConst bool) (*ast.ListValue, error) {
+	if err := parser.enter(); err != nil {
+		return nil, err
+	}
+	defer parser.leave()
 	start := parser.Token.Start
 	if _, err := expect(parser, lexer.BRACKET_L); err != nil {
 		return nil, err
@@ -752,6 +811,10 @@ func parseList(parser *Parser, isConst bool) (*ast.ListValue, error) {
  *   - { ObjectField[?Const]+ }
  */
 func parseObject(parser *Parser, isConst bool) (*ast.ObjectValue, error) {
+	if err := parser.enter(); err != nil {
+		return nil, err
+	}
+	defer parser.leave()
 	start := parser.Token.Start
 	if _, err := expect(parser, lexer.BRACE_L); err != nil {
 		return nil, err
@@ -853,6 +916,10 @@ func parseDirective(parser *Parser) (*ast.Directive, error) {
  *   - NonNullType
  */
 func parseType(parser *Parser) (ttype ast.Type, err error) {
+	if err = parser.enter(); err != nil {
+		return nil, err
+	}
+	defer parser.leave()
 	token := parser.Token
 	// [ String! ]!
 	switch token.Kind {

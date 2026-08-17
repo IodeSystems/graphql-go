@@ -6,13 +6,32 @@ Supports: queries, mutations & subscriptions.
 
 ### About this fork
 
-This is the [IodeSystems](https://github.com/IodeSystems) fork of [`graphql-go/graphql`](https://github.com/graphql-go/graphql). Drop-in replacement at the package level (no API removals) that adds:
+This is the [IodeSystems](https://github.com/IodeSystems) fork of [`graphql-go/graphql`](https://github.com/graphql-go/graphql).
 
-- **Query plan caching** (`PlanQuery` + `ExecutePlan`) — parse/validate/plan once, execute many.
-- **Resolver-side append API** (`Field.ResolveAppend`) — opt-in zero-boxing JSON emission.
-- **Substantial parser and executor perf work** — see the Performance section below.
+**Current with upstream as of [`6acef35`](https://github.com/graphql-go/graphql/commit/6acef3563ff762c0f5cd14b759ed2cca405ac8fa) (2026-06-22).** Every upstream commit through that point is either absorbed here or recorded with a reason for refusing it, and every open upstream PR has been triaged. `UPSTREAM.md` holds the ledger and the sync procedure; `bin/upstream` reports anything new.
 
-All optimizations are default-on (opt-out via `ExecuteParams` flags where behaviorally relevant). The append API is opt-in because it requires schema-author changes; everything else applies transparently. Upstream PRs may stagnate; this fork ships independently while remaining merge-friendly.
+Work flows both ways. Upstream merged this fork's query-plan cache ([#740](https://github.com/graphql-go/graphql/pull/740)), so `PlanQuery` / `ExecutePlan` now ship upstream as well; an upstream fix to that same code ([#747](https://github.com/graphql-go/graphql/pull/747)) came back here.
+
+What this fork adds on top of upstream today:
+
+- **Resolver-side append API** (`Field.ResolveAppend`, `ExecutePlanAppend`, `ScalarConfig.AppendJSON`) — opt-in zero-boxing JSON emission, ~3.7× faster than the map-tree path. Opt-in because it requires schema-author changes.
+- **Substantial parser and executor perf work** — parser geomean 2.25× faster with 91% fewer allocations. See the Performance section below.
+- **Pooled resolver arguments** and assorted execution-path tuning, applied transparently.
+
+#### Migrating from upstream
+
+Source-compatible except for one API removal, plus two defaults that change behavior without changing signatures.
+
+**Removed:** `ResolveInfo.Path` and the `ResponsePath` type. Responses are unaffected — `errors[].path` is still populated — so the only thing that stops compiling is a resolver reading `info.Path`.
+
+**Changed defaults.** Both are `ExecuteParams` flags, and setting either restores upstream behavior:
+
+| Flag | Default | Difference from upstream |
+|---|---|---|
+| `RetainArgs` | `false` | `ResolveParams.Args` is pooled and reused across resolver calls. Read `p.Args` freely, but do not retain it past the call — in a struct field, channel, or goroutine. Set `true` if you do: there is no compile error and no panic, just wrong data. |
+| `ConcurrentThunks` | `false` | Resolver-returned thunks are dethunked as they return rather than breadth-first. Thunks that only defer work are unaffected; thunks that start goroutines and rely on the dethunk pass for parallelism (upstream's `examples/concurrent-resolvers` pattern) lose it. |
+
+Two further differences need no opt-in and should only ever return more data, never less: introspection returns `__schema.types` and `__type.fields` in sorted order (upstream's ordering is map-random), and `DefaultResolveFn` resolves fields promoted from embedded structs following Go's own promotion rules (upstream returns null for them).
 
 ### Documentation
 

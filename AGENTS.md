@@ -40,7 +40,7 @@ No linter, formatter, build step, or codegen. `go fmt` and `go vet` are the only
 | `ConcurrentThunks` | `false` | When true, delegates to `ExecutePlan` + `json.Marshal` for breadth-first thunk dethunking. Set if resolvers return `func() (interface{}, error)` thunks that kick off goroutines. |
 | `RetainArgs` | `false` | When false (default), the executor pools `ResolveParams.Args` via `sync.Pool`. Set true if resolvers retain `p.Args` past the call. |
 
-`ResolveInfo.Path` is `nil` under `ExecutePlanAppend`. Error paths are reconstructed from the internal `pathBuf` depth-stack. `ExecutePlan` (map-tree) always populates `info.Path`.
+`ResolveInfo.Path` and the `ResponsePath` type no longer exist — dropped in 682320e. Both walkers reconstruct `errors[].path` from the internal `pathBuf` depth-stack via `executionContext.errorPathArray`; there is no resolver-side path accessor.
 
 ## Testing
 

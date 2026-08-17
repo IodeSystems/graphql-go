@@ -511,9 +511,6 @@ func defineInterfaces(ttype *Object, interfaces []*Interface) ([]*Interface, err
 					`function. There is no way to resolve this implementing type `+
 					`during execution.`, iface, ttype,
 			)
-			if err != nil {
-				return ifaces, err
-			}
 		}
 		ifaces = append(ifaces, iface)
 	}

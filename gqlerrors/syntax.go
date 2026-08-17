@@ -32,38 +32,61 @@ func printCharCode(code rune) string {
 	return fmt.Sprintf(`\u%04X`, code)
 }
 func printLine(str string) string {
-	strSlice := []string{}
+	// Fast path: nothing to escape, which is every ordinary source line.
+	// Avoids building the string rune by rune for the common case.
+	needsEscape := false
 	for _, runeValue := range str {
-		strSlice = append(strSlice, printCharCode(runeValue))
+		if runeValue < 0x0020 {
+			needsEscape = true
+			break
+		}
 	}
-	return fmt.Sprintf(`%s`, strings.Join(strSlice, ""))
+	if !needsEscape {
+		return str
+	}
+	var b strings.Builder
+	b.Grow(len(str))
+	for _, runeValue := range str {
+		b.WriteString(printCharCode(runeValue))
+	}
+	return b.String()
 }
+
+// lineSplitRE splits a source body into lines. Package-level so it is
+// compiled once rather than on every syntax error — error construction
+// is on the request path for any malformed query.
+var lineSplitRE = regexp.MustCompile("\r\n|[\n\r]")
+
 func highlightSourceAtLocation(s *source.Source, l location.SourceLocation) string {
 	line := l.Line
 	prevLineNum := fmt.Sprintf("%d", (line - 1))
 	lineNum := fmt.Sprintf("%d", line)
 	nextLineNum := fmt.Sprintf("%d", (line + 1))
 	padLen := len(nextLineNum)
-	lines := regexp.MustCompile("\r\n|[\n\r]").Split(string(s.Body), -1)
-	var highlight string
+	lines := lineSplitRE.Split(string(s.Body), -1)
+	var highlight strings.Builder
 	if line >= 2 {
-		highlight += fmt.Sprintf("%s: %s\n", lpad(padLen, prevLineNum), printLine(lines[line-2]))
+		fmt.Fprintf(&highlight, "%s: %s\n", lpad(padLen, prevLineNum), printLine(lines[line-2]))
 	}
-	highlight += fmt.Sprintf("%s: %s\n", lpad(padLen, lineNum), printLine(lines[line-1]))
-	for i := 1; i < (2 + padLen + l.Column); i++ {
-		highlight += " "
+	fmt.Fprintf(&highlight, "%s: %s\n", lpad(padLen, lineNum), printLine(lines[line-1]))
+	// The caret indent is as wide as the error's column, so on a
+	// single-line document it is as wide as the document. Building it by
+	// repeated concatenation reallocated and copied the whole prefix each
+	// time — quadratic in the column number, which made one syntax error
+	// on a long minified query burn seconds of CPU.
+	if indent := 1 + padLen + l.Column; indent > 0 {
+		highlight.WriteString(strings.Repeat(" ", indent))
 	}
-	highlight += "^\n"
+	highlight.WriteString("^\n")
 	if line < len(lines) {
-		highlight += fmt.Sprintf("%s: %s\n", lpad(padLen, nextLineNum), printLine(lines[line]))
+		fmt.Fprintf(&highlight, "%s: %s\n", lpad(padLen, nextLineNum), printLine(lines[line]))
 	}
-	return highlight
+	return highlight.String()
 }
 
 func lpad(l int, s string) string {
-	var r string
-	for i := 1; i < (l - len(s) + 1); i++ {
-		r += " "
+	if n := l - len(s); n > 0 {
+		return strings.Repeat(" ", n) + s
 	}
-	return r + s
+	return s
 }

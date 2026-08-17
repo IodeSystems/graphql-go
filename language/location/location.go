@@ -11,6 +11,11 @@ type SourceLocation struct {
 	Column int `json:"column"`
 }
 
+// lineRegexp matches a line terminator. Package-level so it is compiled
+// once rather than on every call — GetLocation runs for every syntax
+// error, which is request-path work for any malformed query.
+var lineRegexp = regexp.MustCompile("\r\n|[\n\r]")
+
 func GetLocation(s *source.Source, position int) SourceLocation {
 	body := []byte{}
 	if s != nil {
@@ -18,7 +23,6 @@ func GetLocation(s *source.Source, position int) SourceLocation {
 	}
 	line := 1
 	column := position + 1
-	lineRegexp := regexp.MustCompile("\r\n|[\n\r]")
 	matches := lineRegexp.FindAllIndex(body, -1)
 	for _, match := range matches {
 		matchIndex := match[0]

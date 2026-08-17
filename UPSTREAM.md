@@ -73,6 +73,33 @@ never taken.
 In `upstream.jsonl`. Run `bin/upstream --ledger` to read them, or
 `bin/upstream --all` to see them against the commits they describe.
 
+## Open upstream issues
+
+Triaged 2026-08-17 against the then-open issues on `graphql-go/graphql`.
+Re-check with `gh issue list --repo graphql-go/graphql --state open`.
+
+Already fixed here: `#742` (overlapping-fields stack overflow on cyclic
+fragment spreads, `49e909d`), `#699` (multi-byte runes in comments — the
+lexer rewrite handles them), `#700` (`DefaultResolveFn` with a custom
+string-keyed map type), `#629` (explicit nulls missing from
+`ResolveParams.Args`).
+
+Acted on: `#754` (unbounded parser recursion). Triaging it turned up a
+separate and more reachable problem — syntax-error formatting was
+quadratic in the error's column, so one malformed 80KB single-line query
+cost ~2.7s of CPU with no nesting involved. Fixed in `3a8f62e`. The
+recursion depth cap the issue actually proposes is **still open here**:
+the parser descends one frame per nesting level with no limit, so a
+sufficiently deep document can exhaust the goroutine stack, which is a
+fatal runtime error that `recover` cannot catch. Adding a cap rejects
+documents that parse today, so it needs a decision on the limit and on
+whether it is configurable.
+
+Not acted on: `#750` (return partial data alongside errors) reads as a
+feature request rather than a defect; the executor already emits partial
+data with field errors. The rest are questions, feature requests, or
+upstream-workflow issues.
+
 ## Open upstream PRs
 
 Triaged 2026-08-17 against the 38 then-open PRs on `graphql-go/graphql`.

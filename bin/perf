@@ -100,6 +100,9 @@ else
     WT_B="$REPO_ROOT"
 fi
 
+MOD_A=$(head -1 "$WT_A/go.mod" | awk '{print $2}')
+MOD_B=$(head -1 "$WT_B/go.mod" | awk '{print $2}')
+
 has_plan() { test -f "$1/plan_bench_test.go"; }
 has_parse_bench() { test -f "$1/language/parser/parser_bench_test.go"; }
 
@@ -129,12 +132,19 @@ fi
 
 # normalize_pkg rewrites the "pkg:" line in a benchmark output file to a
 # module-agnostic form so benchstat can pair results across forks with
-# different module paths. E.g.:
-#   pkg: github.com/IodeSystems/graphql-go/language/parser
-# becomes:
-#   pkg: language/parser
+# different module paths. Args: file module-path. E.g. with module
+# github.com/IodeSystems/graphql-go:
+#   pkg: github.com/IodeSystems/graphql-go/language/parser -> pkg: language/parser
+#   pkg: github.com/IodeSystems/graphql-go                 -> pkg: root
+#
+# Strips the module prefix rather than keeping the last path segment: the
+# fork and upstream module names differ in their final segment
+# (graphql-go vs graphql), so a last-segment rule leaves the root package
+# labelled differently on each side and benchstat then refuses to pair
+# them — it emits two single-column tables instead of a comparison.
 normalize_pkg() {
-    sed -i -E 's|^pkg: .*/([^/]+)$|pkg: \1|' "$1"
+    local file=$1 mod=$2
+    sed -i -E "s|^pkg: ${mod}/|pkg: |; s|^pkg: ${mod}\$|pkg: root|" "$file"
 }
 
 run_bench() {
@@ -162,8 +172,8 @@ if [ "$PARSE_OK" = "1" ]; then
     err "==> parse benchmarks ($SHORT_B)"
     run_bench "$WT_B" "$PARSE_PATTERN" "./language/parser/" "$PARSE_OUT_B"
     # Normalize pkg: lines so benchstat can pair across module paths.
-    normalize_pkg "$PARSE_OUT_A"
-    normalize_pkg "$PARSE_OUT_B"
+    normalize_pkg "$PARSE_OUT_A" "$MOD_A"
+    normalize_pkg "$PARSE_OUT_B" "$MOD_B"
 fi
 
 # Strip the variant prefix so a per-tier benchstat run pairs benchmarks
@@ -194,8 +204,8 @@ if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
     err "==> plan benchmarks ($SHORT_B)"
     run_bench "$WT_B" "$PLAN_AB_PATTERN" "./" "$PLAN_OUT_B"
     # Normalize pkg: lines so benchstat can pair across module paths.
-    normalize_pkg "$PLAN_OUT_A"
-    normalize_pkg "$PLAN_OUT_B"
+    normalize_pkg "$PLAN_OUT_A" "$MOD_A"
+    normalize_pkg "$PLAN_OUT_B" "$MOD_B"
 elif [ "$PLAN_A" = "1" ]; then
     run_solo_tiers "$SHORT_A" "$WT_A" \
         "$PLAN_SOLO_UNCACHED_A" "$PLAN_SOLO_PLANNED_A" \
@@ -242,6 +252,19 @@ summary_table() {
             if (m >= 10)  return sprintf("%.1fx", m)
             return sprintf("%.2fx", m)
         }
+        # Convert a benchstat "vs base" percentage ("-19.50%") to the same
+        # multiplier fmt_mult expects. Used for the geomean row: each
+        # column geomean covers only the benchmarks present in that column,
+        # so when a ref lacks some benchmarks the two column geomeans are
+        # over different sets and dividing them is meaningless. benchstat
+        # computes its delta over the paired subset, which is the honest
+        # comparison.
+        function mult_from_delta(d,    p) {
+            gsub(/%/, "", d)
+            p = d + 0
+            if (p <= -100) return 0
+            return 100 / (100 + p)
+        }
         $2 == "sec/op" { in_section = 1; next }
         $2 == "B/op" || $2 == "allocs/op" { in_section = 0; next }
         /^,/ { next }
@@ -273,10 +296,14 @@ summary_table() {
                     delta = $dfield
                     val = $vfield + 0
                     if (val == 0 || base_val == 0) {
-                        # No measurement, or no base to compare to.
+                        # No measurement, or no base to compare to: this
+                        # benchmark exists in only one ref.
                         cell = fmt($vfield)
+                        unpaired = 1
                     } else if (delta == "" || delta == "~") {
                         cell = fmt($vfield) " (~)"
+                    } else if (is_geo) {
+                        cell = fmt($vfield) " (" fmt_mult(mult_from_delta(delta)) ")"
                     } else {
                         cell = fmt($vfield) " (" fmt_mult(base_val / val) ")"
                     }
@@ -285,6 +312,12 @@ summary_table() {
                 row = row " | " cell
             }
             print row " |"
+        }
+        END {
+            if (unpaired) {
+                print ""
+                print "_Blank cells: benchmark absent from that ref. The geomean × is benchstat'"'"'s, computed over the benchmarks present in both; each column'"'"'s geomean value covers only its own rows._"
+            }
         }
     '
 }
@@ -323,10 +356,24 @@ emit_section() {
 }
 
 DATE=$(date -u +%Y-%m-%d)
+
+# Divergence at comparison time. In dirty mode ("." for B) the commit
+# counts are HEAD's — uncommitted changes have no commit to count.
+if [ "$USE_DIR_B" = "1" ]; then
+    CMP_B=$(git rev-parse --verify HEAD)
+    CMP_B_NOTE=" (counts are HEAD's; B also has uncommitted changes)"
+else
+    CMP_B="$SHA_B"
+    CMP_B_NOTE=""
+fi
+AHEAD=$(git rev-list --count "$SHA_A".."$CMP_B")
+BEHIND=$(git rev-list --count "$CMP_B".."$SHA_A")
+
 TABLE=$(mktemp)
 {
-    printf "_Generated by \`bin/perf\` on %s. A=\`%s\` (%s), B=\`%s\` (%s). count=%s, benchtime=%s._\n\n" \
-        "$DATE" "$REF_A" "$SHORT_A" "$REF_B" "$SHORT_B" "$COUNT" "$BENCHTIME"
+    printf "_Generated by \`bin/perf\` on %s. A=\`%s\` (%s), B=\`%s\` (%s). B is %s commits ahead of A, %s behind%s. count=%s, benchtime=%s._\n\n" \
+        "$DATE" "$REF_A" "$SHORT_A" "$REF_B" "$SHORT_B" \
+        "$AHEAD" "$BEHIND" "$CMP_B_NOTE" "$COUNT" "$BENCHTIME"
 
     if [ "$PARSE_OK" = "1" ]; then
         emit_section "Parser" "no parse benchmarks in either ref" \

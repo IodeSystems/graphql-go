@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"strconv"
+	"sync"
 
 	"github.com/IodeSystems/graphql-go/gqlerrors"
 	"github.com/IodeSystems/graphql-go/language/ast"
@@ -35,6 +36,11 @@ type Plan struct {
 	rootType   *Object
 	root       *selectionPlan
 	isMutation bool
+
+	// abstractMu guards lazy population of fieldPlan.abstractAlternatives,
+	// which happens at execute time (concurrently across fields) the
+	// first time each concrete type is encountered for an abstract field.
+	abstractMu sync.Mutex
 }
 
 // selectionPlan is a pre-collected, source-ordered list of fields to
@@ -228,23 +234,39 @@ func (p *Plan) planSelectionSet(parentType *Object, selectionSet *ast.SelectionS
 // fieldASTs, but at plan time so the executor can use the result
 // directly.
 func (p *Plan) planMergedFieldChildren(fp *fieldPlan) {
-	t := unwrapNamedType(fp.returnType)
-	switch concrete := t.(type) {
-	case *Object:
-		fp.sub = p.planMergedSelectionsForType(concrete, fp.fieldASTs)
-	case *Interface:
-		possibleTypes := p.schema.PossibleTypes(concrete)
-		fp.abstractAlternatives = make(map[*Object]*selectionPlan, len(possibleTypes))
-		for _, pt := range possibleTypes {
-			fp.abstractAlternatives[pt] = p.planMergedSelectionsForType(pt, fp.fieldASTs)
-		}
-	case *Union:
-		possibleTypes := p.schema.PossibleTypes(concrete)
-		fp.abstractAlternatives = make(map[*Object]*selectionPlan, len(possibleTypes))
-		for _, pt := range possibleTypes {
-			fp.abstractAlternatives[pt] = p.planMergedSelectionsForType(pt, fp.fieldASTs)
-		}
+	// Object returns resolve to a single concrete type, so plan their
+	// sub-selection eagerly.
+	if obj, ok := unwrapNamedType(fp.returnType).(*Object); ok {
+		fp.sub = p.planMergedSelectionsForType(obj, fp.fieldASTs)
+		return
 	}
+	// Abstract returns (Interface / Union) are planned lazily, per
+	// concrete type, the first time that type is actually encountered at
+	// execute time (see Plan.abstractAlternative). Eagerly expanding
+	// every possible type here is O(possibleTypes) per abstract field;
+	// because each expanded type's sub-selection can contain further
+	// abstract fields, it compounds to O(possibleTypes ^ nesting-depth)
+	// — which makes deeply-nested polymorphic queries on large schemas
+	// take minutes to plan, even though a single request only ever
+	// resolves one concrete type per level.
+}
+
+// abstractAlternative returns the planned sub-selection for an abstract
+// field's runtime concrete type, planning (and caching) it on first use.
+// Concurrency-safe: ExecutePlan resolves fields concurrently, so several
+// goroutines may reach the same abstract field at once.
+func (p *Plan) abstractAlternative(fp *fieldPlan, runtimeType *Object) *selectionPlan {
+	p.abstractMu.Lock()
+	defer p.abstractMu.Unlock()
+	if fp.abstractAlternatives == nil {
+		fp.abstractAlternatives = map[*Object]*selectionPlan{}
+	}
+	if sub, ok := fp.abstractAlternatives[runtimeType]; ok {
+		return sub
+	}
+	sub := p.planMergedSelectionsForType(runtimeType, fp.fieldASTs)
+	fp.abstractAlternatives[runtimeType] = sub
+	return sub
 }
 
 // planMergedSelectionsForType collects the union of every AST's
@@ -698,6 +720,7 @@ func ExecutePlan(plan *Plan, p ExecuteParams) (result *Result) {
 			VariableValues: variableValues,
 			Context:        ctx,
 			poolArgs:       !p.RetainArgs,
+			plan:           plan,
 		}
 
 		data := executePlannedSelection(eCtx, plan.root, p.Root, plan.rootType)
@@ -1027,13 +1050,17 @@ func completePlannedAbstractValue(eCtx *executionContext, returnType Abstract, f
 			fmt.Sprintf(`Runtime Object type "%v" is not a possible type for "%v".`, runtimeType, returnType),
 		))
 	}
-	if sub, ok := fp.abstractAlternatives[runtimeType]; ok && sub != nil {
-		return executePlannedSelection(eCtx, sub, result, runtimeType)
+	// Plan (and cache) the concrete type's sub-selection on first use.
+	// Abstract alternatives are planned lazily so that only the types a
+	// request actually resolves are ever planned — see
+	// planMergedFieldChildren.
+	if eCtx.plan != nil {
+		if sub := eCtx.plan.abstractAlternative(fp, runtimeType); sub != nil {
+			return executePlannedSelection(eCtx, sub, result, runtimeType)
+		}
 	}
-	// Defensive fallback: unplanned concrete type (e.g. interface
-	// gained a new implementer between plan time and execute time —
-	// shouldn't happen in practice since schema rebuilds invalidate
-	// the plan, but stay correct).
+	// The concrete type contributes no selectable fields (e.g. only
+	// inline fragments on other types matched). Surface an empty object.
 	return map[string]interface{}{}
 }
 
@@ -1080,6 +1107,7 @@ func ExecutePlanAppend(plan *Plan, p ExecuteParams, dst []byte) ([]byte, []gqler
 		VariableValues: variableValues,
 		Context:        ctx,
 		poolArgs:       !p.RetainArgs,
+		plan:           plan,
 	}
 
 	dst = append(dst, `{"data":`...)
@@ -1673,8 +1701,12 @@ func writeCompleteAbstractValue(eCtx *executionContext, returnType Abstract, fp 
 			fmt.Sprintf(`Runtime Object type "%v" is not a possible type for "%v".`, runtimeType, returnType),
 		))
 	}
-	if sub, ok := fp.abstractAlternatives[runtimeType]; ok && sub != nil {
-		return writePlannedSelection(eCtx, sub, result, runtimeType, dst)
+	// Plan (and cache) the concrete type's sub-selection on first use —
+	// same lazy path as the map-tree walker, see planMergedFieldChildren.
+	if eCtx.plan != nil {
+		if sub := eCtx.plan.abstractAlternative(fp, runtimeType); sub != nil {
+			return writePlannedSelection(eCtx, sub, result, runtimeType, dst)
+		}
 	}
 	return append(dst, '{', '}')
 }

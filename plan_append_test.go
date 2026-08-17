@@ -336,6 +336,56 @@ func TestAppendParity_Interface(t *testing.T) {
 	runParity(t, schema, `{ pets { name ... on Dog { barks } ... on Cat { meows } } }`, "", nil, nil)
 }
 
+// TestAppendParity_Union covers the append-mode walker's abstract
+// branch for Unions specifically: sub-selections are planned lazily
+// on first sight of a concrete type, so both walkers must agree.
+func TestAppendParity_Union(t *testing.T) {
+	dog := graphql.NewObject(graphql.ObjectConfig{
+		Name: "UDog",
+		Fields: graphql.Fields{
+			"name":  &graphql.Field{Type: graphql.String},
+			"barks": &graphql.Field{Type: graphql.Boolean},
+		},
+	})
+	cat := graphql.NewObject(graphql.ObjectConfig{
+		Name: "UCat",
+		Fields: graphql.Fields{
+			"name":  &graphql.Field{Type: graphql.String},
+			"meows": &graphql.Field{Type: graphql.Boolean},
+		},
+	})
+	pet := graphql.NewUnion(graphql.UnionConfig{
+		Name:  "UPet",
+		Types: []*graphql.Object{dog, cat},
+		ResolveType: func(p graphql.ResolveTypeParams) *graphql.Object {
+			if p.Value.(map[string]interface{})["__t"] == "dog" {
+				return dog
+			}
+			return cat
+		},
+	})
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Q",
+			Fields: graphql.Fields{
+				"pets": &graphql.Field{
+					Type: graphql.NewList(pet),
+					Resolve: func(graphql.ResolveParams) (interface{}, error) {
+						return []interface{}{
+							map[string]interface{}{"__t": "dog", "name": "Rex", "barks": true},
+							map[string]interface{}{"__t": "cat", "name": "Mia", "meows": true},
+						}, nil
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runParity(t, schema, `{ pets { ... on UDog { name barks } ... on UCat { name meows } } }`, "", nil, nil)
+}
+
 func TestAppendParity_Variables(t *testing.T) {
 	schema, err := graphql.NewSchema(graphql.SchemaConfig{
 		Query: graphql.NewObject(graphql.ObjectConfig{

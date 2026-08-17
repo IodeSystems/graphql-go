@@ -89,6 +89,11 @@ type executionContext struct {
 	Errors         []gqlerrors.FormattedError
 	Context        context.Context
 
+	// plan is set on the ExecutePlan / ExecutePlanAppend paths; it lets
+	// abstract fields plan their concrete-type sub-selections lazily at
+	// execute time.
+	plan *Plan
+
 	// pathBuf is the depth-stack for the response path. Entries are
 	// stored inline ([]pathEntry) to avoid per-element interface{}
 	// boxing. Both walkers (ExecutePlan and ExecutePlanAppend) push

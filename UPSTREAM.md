@@ -65,6 +65,40 @@ current.
 - `e55663f` removed error propagation in `parseDocument` / `parseOperationDefinition`;
   `de087e8` put it back. Nothing to take.
 
+## Open upstream PRs
+
+Triaged 2026-08-17 against the 38 then-open PRs on `graphql-go/graphql`.
+Re-check with `gh pr list --repo graphql-go/graphql --state open`; only
+PRs opened since that date need a fresh look.
+
+Already in this fork, verified by matching the actual source hunks rather
+than the titles — several arrived through our own independent fixes:
+`#739` (non-null args with defaults, ours is `36ecd3f`), `#730`
+(nullable variable into a defaulted non-null arg), `#737` (custom
+string-based map key types), `#717`, `#706` (preserve Extensions),
+`#636` (deterministic introspection order), `#631` (explicit-null input
+object fields), `#602`, `#605` (multi-byte comments — moot here, the
+lexer rewrite already handles them), `#555`, `#550`, `#547` (optional
+`=` in union definitions), `#518`, `#465`, `#445`.
+
+Acted on: `#371` — fields promoted from embedded structs resolved to
+null. Fixed in `9e89e97`, implemented against Go's promotion rules rather
+than cherry-picked; see that commit for why the PR's own version is not
+the one to take.
+
+Not worth taking:
+
+- `#696`, `#683`, `#536`, `#401` — four competing null-literal
+  implementations, 260-409 lines each, unmerged for years and never
+  reconciled with each other. Adopting one means owning that choice.
+- `#630` — adds `ResolveInfo.FieldNameAlias` so `DefaultResolveFn` reads
+  the source map by alias. An alias is a response key, not a source key;
+  this changes which data a field resolves to based on how it was named
+  in the query.
+- `#639`, `#428` (tracing), `#559` (auto-bind), `#589`, `#552`, `#473`,
+  `#475`, `#398`, `#479`, `#277`, `#253` — features and reworks, not
+  fixes. Revisit only if we want the capability.
+
 ## Deliberately skipped
 
 - **`d1712d3`** — drops the two `!valueVal.IsValid()` guards in

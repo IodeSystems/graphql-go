@@ -166,6 +166,11 @@ command -v benchstat >/dev/null || die "benchstat not on PATH after install"
 TMP=$(mktemp -d)
 WT_A="$TMP/wt-a"; WT_B="$TMP/wt-b"
 cleanup() {
+    # Also removes the PID lock: this trap replaces the earlier
+    # 'trap rm EXIT' set when the lock was taken, because bash keeps one
+    # handler per signal. Without this the lock file survived every run
+    # and each later run reported clearing a stale lock.
+    rm -f "$LOCKFILE"
     git worktree remove --force "$WT_A" >/dev/null 2>&1 || true
     if [ "$USE_DIR_B" = "0" ]; then
         git worktree remove --force "$WT_B" >/dev/null 2>&1 || true

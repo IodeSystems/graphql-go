@@ -2,73 +2,132 @@
 #
 # bin/perf — compare benchmark performance between two git refs.
 #
-# Uses git worktrees so the working tree is never disturbed. Auto-detects
-# query-plan support (presence of plan_bench_test.go) per ref.
+# Runs every benchmark in the repo by default. The benchmark list is
+# discovered from the refs themselves, not hardcoded: anything that does
+# not match a known group still runs, under an "other" group. A newly
+# added benchmark is therefore picked up automatically rather than being
+# silently left out of the comparison.
 #
-#   - both refs support plan: A vs B comparison on planned + plan-cache benches
-#   - one ref supports plan: 4-tier comparison on the supporting ref
-#       (uncached → planned → +append → +append-eager)
-#       Frames the case for the non-supporting ref to adopt plan support.
-#   - neither: plan section is skipped.
+# Uses git worktrees, so the working tree is never touched and comparing
+# two commits needs no stashing.
 #
 # Usage:
-#   bin/perf                              # upstream/master vs HEAD
-#   bin/perf <ref-a> <ref-b>              # explicit refs
-#   bin/perf <ref-a> <ref-b> --no-readme  # skip README update; print to stdout
+#   bin/perf                        # upstream/master vs HEAD, updates README
+#   bin/perf <ref>                  # <ref> vs the working tree (even if dirty)
+#   bin/perf <ref-a> <ref-b>        # two explicit refs
+#   bin/perf --list                 # show every benchmark and its group; run nothing
+#
+# Targeting (default: every group):
+#   --only <group>[,<group>...]     restrict to named groups (see --list)
+#   --bench <regex>                 arbitrary benchmark regex; implies --no-readme
+#
+# Run control:
+#   --count <n>                     samples per benchmark (default: 6)
+#   --benchtime <t>                 per-sample budget (default: 2s)
+#   --quick                         count=1, benchtime=10x; implies --no-readme
+#   --force                         run even when the machine looks busy
+#
+# Output:
+#   --no-readme                     print to stdout instead of updating README
 #
 # Environment:
-#   PERF_COUNT      benchmark iterations per bench (default: 6)
-#   PERF_BENCHTIME  per-iteration time budget (default: 2s)
+#   PERF_COUNT / PERF_BENCHTIME     defaults for --count / --benchtime
 #
 # Requires: go, git, benchstat (auto-installed if missing).
 
 set -euo pipefail
 
-# Single-arg mode: bin/perf <ref> benchmarks the current working tree
-# (even if dirty) against <ref>. Two-arg mode: bin/perf <ref-a> <ref-b>
-# uses worktrees for both sides (requires clean commits).
-UPDATE_README=1
-for arg in "$@"; do
-    [ "$arg" = "--no-readme" ] && UPDATE_README=0
-done
-if [ $# -eq 1 ] || { [ $# -eq 2 ] && [ "$2" = "--no-readme" ]; }; then
-    REF_A="${1}"
-    REF_B="."
-elif [ $# -eq 2 ]; then
-    REF_A="${1}"
-    REF_B="${2}"
-else
-    REF_A="upstream/master"
-    REF_B="HEAD"
-fi
-
-PARSE_PATTERN='^BenchmarkParse_'
-# When both refs support query plan, compare A vs B on planned + cache benches.
-PLAN_AB_PATTERN='^BenchmarkPlanned|^BenchmarkPlanCache_'
-# When only one ref supports query plan, the four execution tiers run
-# independently and pair by suffix after prefix-stripping.
-PLAN_ONLY_UNCACHED='^BenchmarkUncachedExecute_'
-PLAN_ONLY_PLANNED='^BenchmarkPlannedExecute_'
-PLAN_ONLY_APPEND='^BenchmarkPlannedAppend_'
-COUNT="${PERF_COUNT:-6}"
-BENCHTIME="${PERF_BENCHTIME:-2s}"
-
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
 err() { echo "perf: $*" >&2; }
+die() { err "$*"; exit 2; }
 
-# Resolve refs. "." means current working tree (no checkout needed).
+# ---------------------------------------------------------------- groups
+#
+# name :: package :: benchmark regex
+#
+# Grouping is presentation only — it decides which benchmarks share a
+# table. Coverage does not depend on it: whatever these patterns miss is
+# collected into an "other-<pkg>" group and run anyway.
+GROUP_DEFS=(
+    "parse::./language/parser/::^BenchmarkParse_"
+    "print::./language/printer/::^BenchmarkPrint"
+    "plan::./::^BenchmarkPlanned|^BenchmarkPlanCache|^BenchmarkPlanQuery"
+    "execute::./::^BenchmarkUncachedExecute|^BenchmarkWideQuery|^BenchmarkListQuery"
+)
+PACKAGES=("./" "./language/parser/" "./language/printer/")
+
+# ----------------------------------------------------------------- args
+ONLY=""; BENCH_RE=""
+UPDATE_README=1; DO_LIST=0; FORCE=0
+COUNT="${PERF_COUNT:-6}"
+BENCHTIME="${PERF_BENCHTIME:-2s}"
+POSITIONAL=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --list)       DO_LIST=1 ;;
+        --no-readme)  UPDATE_README=0 ;;
+        --force)      FORCE=1 ;;
+        --quick)      COUNT=1; BENCHTIME=10x; UPDATE_README=0 ;;
+        --only)       [ $# -ge 2 ] || die "--only needs a value"; ONLY=$2; shift ;;
+        --bench)      [ $# -ge 2 ] || die "--bench needs a value"; BENCH_RE=$2; UPDATE_README=0; shift ;;
+        --count)      [ $# -ge 2 ] || die "--count needs a value"; COUNT=$2; shift ;;
+        --benchtime)  [ $# -ge 2 ] || die "--benchtime needs a value"; BENCHTIME=$2; shift ;;
+        -h|--help)    awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
+        --*)          die "unknown option $1 — see bin/perf --help" ;;
+        *)            POSITIONAL+=("$1") ;;
+    esac
+    shift
+done
+
+REF_A=""; REF_B=""
+case ${#POSITIONAL[@]} in
+    0) REF_A="upstream/master"; REF_B="HEAD" ;;
+    1) REF_A="${POSITIONAL[0]}"; REF_B="." ;;
+    2) REF_A="${POSITIONAL[0]}"; REF_B="${POSITIONAL[1]}" ;;
+    *) die "expected at most two refs, got ${#POSITIONAL[@]}" ;;
+esac
+
+# --------------------------------------------------------- busy machine
+#
+# Numbers from a loaded machine are worse than no numbers: they look
+# authoritative and are wrong. Both guards yield to --force.
+#
+# The lock matters most — it makes two concurrent bin/perf runs (from
+# another shell, or another agent session) impossible rather than merely
+# unlikely.
+LOCKFILE="${TMPDIR:-/tmp}/graphql-go-perf.lock"
+exec 9>"$LOCKFILE" || die "cannot open lock $LOCKFILE"
+if ! flock -n 9; then
+    if [ "$FORCE" = "1" ]; then
+        err "another bin/perf holds the lock; continuing anyway (--force)"
+    else
+        die "another bin/perf is already running (lock: $LOCKFILE). Wait for it, or --force."
+    fi
+fi
+
+if [ "$DO_LIST" = "0" ] && [ "$FORCE" = "0" ]; then
+    cores=$(nproc 2>/dev/null || echo 4)
+    load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
+    if awk -v l="$load" -v c="$cores" 'BEGIN{exit !(l > c/4)}'; then
+        err "machine looks busy: 1-min load ${load} on ${cores} cores."
+        err "Benchmarking now produces numbers you cannot trust."
+        die "Wait for it to settle, or pass --force."
+    fi
+fi
+
+# ------------------------------------------------------------ resolving
+resolve() { git rev-parse --verify --quiet "$1^{commit}" 2>/dev/null || true; }
+
 USE_DIR_B=0
+SHA_A=$(resolve "$REF_A"); [ -n "$SHA_A" ] || die "unknown ref: $REF_A"
+SHORT_A=$(git rev-parse --short "$SHA_A")
 if [ "$REF_B" = "." ]; then
-    SHA_A=$(git rev-parse --verify "$REF_A" 2>/dev/null) || { err "unknown ref: $REF_A"; exit 1; }
-    SHORT_A=$(git rev-parse --short "$SHA_A")
-    SHORT_B="dirty"
-    USE_DIR_B=1
+    USE_DIR_B=1; SHORT_B="dirty"; SHA_B=$(git rev-parse HEAD)
 else
-    SHA_A=$(git rev-parse --verify "$REF_A" 2>/dev/null) || { err "unknown ref: $REF_A"; exit 1; }
-    SHA_B=$(git rev-parse --verify "$REF_B" 2>/dev/null) || { err "unknown ref: $REF_B"; exit 1; }
-    SHORT_A=$(git rev-parse --short "$SHA_A")
+    SHA_B=$(resolve "$REF_B"); [ -n "$SHA_B" ] || die "unknown ref: $REF_B"
     SHORT_B=$(git rev-parse --short "$SHA_B")
 fi
 
@@ -76,18 +135,15 @@ if ! command -v benchstat >/dev/null; then
     err "installing benchstat..."
     go install golang.org/x/perf/cmd/benchstat@latest
 fi
-if ! command -v benchstat >/dev/null; then
-    err "benchstat not on PATH after install; check \$GOBIN/\$GOPATH/bin"
-    exit 1
-fi
+command -v benchstat >/dev/null || die "benchstat not on PATH after install"
 
 TMP=$(mktemp -d)
-WT_A="$TMP/wt-a"
-WT_B="$TMP/wt-b"
-
+WT_A="$TMP/wt-a"; WT_B="$TMP/wt-b"
 cleanup() {
     git worktree remove --force "$WT_A" >/dev/null 2>&1 || true
-    git worktree remove --force "$WT_B" >/dev/null 2>&1 || true
+    if [ "$USE_DIR_B" = "0" ]; then
+        git worktree remove --force "$WT_B" >/dev/null 2>&1 || true
+    fi
     rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -103,136 +159,175 @@ fi
 MOD_A=$(head -1 "$WT_A/go.mod" | awk '{print $2}')
 MOD_B=$(head -1 "$WT_B/go.mod" | awk '{print $2}')
 
-has_plan() { test -f "$1/plan_bench_test.go"; }
-has_parse_bench() { test -f "$1/language/parser/parser_bench_test.go"; }
-
-PLAN_A=0; has_plan "$WT_A" && PLAN_A=1
-PLAN_B=0; has_plan "$WT_B" && PLAN_B=1
-PARSE_OK=0
-# Both refs need parser_bench_test.go. If either is missing, copy from the
-# ref that does have it so we can still measure parse on the other side.
-if has_parse_bench "$WT_A" && has_parse_bench "$WT_B"; then
-    PARSE_OK=1
-elif has_parse_bench "$WT_A" || has_parse_bench "$WT_B"; then
-    SRC="$WT_A"
-    DST="$WT_B"
-    if has_parse_bench "$WT_B"; then SRC="$WT_B"; DST="$WT_A"; fi
-    # Rewrite module import path so the file compiles on the destination.
-    SRC_MOD=$(head -1 "$SRC/go.mod" | awk '{print $2}')
-    DST_MOD=$(head -1 "$DST/go.mod" | awk '{print $2}')
-    if [ "$SRC_MOD" != "$DST_MOD" ]; then
-        sed "s|$SRC_MOD|$DST_MOD|g" "$SRC/language/parser/parser_bench_test.go" \
-            > "$DST/language/parser/parser_bench_test.go"
-    else
-        cp "$SRC/language/parser/parser_bench_test.go" "$DST/language/parser/parser_bench_test.go"
-    fi
-    PARSE_OK=1
-    err "copied parser_bench_test.go from $SRC into $DST (module: $SRC_MOD -> $DST_MOD)"
-fi
-
-# normalize_pkg rewrites the "pkg:" line in a benchmark output file to a
-# module-agnostic form so benchstat can pair results across forks with
-# different module paths. Args: file module-path. E.g. with module
-# github.com/IodeSystems/graphql-go:
-#   pkg: github.com/IodeSystems/graphql-go/language/parser -> pkg: language/parser
-#   pkg: github.com/IodeSystems/graphql-go                 -> pkg: root
+# ------------------------------------------------- cross-ref bench files
 #
-# Strips the module prefix rather than keeping the last path segment: the
-# fork and upstream module names differ in their final segment
-# (graphql-go vs graphql), so a last-segment rule leaves the root package
-# labelled differently on each side and benchstat then refuses to pair
-# them — it emits two single-column tables instead of a comparison.
-normalize_pkg() {
-    local file=$1 mod=$2
-    sed -i -E "s|^pkg: ${mod}/|pkg: |; s|^pkg: ${mod}\$|pkg: root|" "$file"
-}
-
-run_bench() {
-    local dir=$1 pat=$2 pkg=$3 out=$4
-    err "  $pat ($pkg) in $(basename "$dir")"
-    (cd "$dir" && go test -run='^$' -bench="$pat" -benchtime="$BENCHTIME" -count="$COUNT" "$pkg" 2>/dev/null) > "$out"
-}
-
-# File names show up as benchstat column headers — keep them short and meaningful.
-PARSE_OUT_A="$TMP/${SHORT_A}-parse.txt"
-PARSE_OUT_B="$TMP/${SHORT_B}-parse.txt"
-PLAN_OUT_A="$TMP/${SHORT_A}-plan.txt"
-PLAN_OUT_B="$TMP/${SHORT_B}-plan.txt"
-# Solo path: per-tier files (uncached/planned/append) on each supporting ref.
-PLAN_SOLO_UNCACHED_A="$TMP/${SHORT_A}-uncached.txt"
-PLAN_SOLO_PLANNED_A="$TMP/${SHORT_A}-planned.txt"
-PLAN_SOLO_APPEND_A="$TMP/${SHORT_A}-append.txt"
-PLAN_SOLO_UNCACHED_B="$TMP/${SHORT_B}-uncached.txt"
-PLAN_SOLO_PLANNED_B="$TMP/${SHORT_B}-planned.txt"
-PLAN_SOLO_APPEND_B="$TMP/${SHORT_B}-append.txt"
-
-if [ "$PARSE_OK" = "1" ]; then
-    err "==> parse benchmarks ($SHORT_A)"
-    run_bench "$WT_A" "$PARSE_PATTERN" "./language/parser/" "$PARSE_OUT_A"
-    err "==> parse benchmarks ($SHORT_B)"
-    run_bench "$WT_B" "$PARSE_PATTERN" "./language/parser/" "$PARSE_OUT_B"
-    # Normalize pkg: lines so benchstat can pair across module paths.
-    normalize_pkg "$PARSE_OUT_A" "$MOD_A"
-    normalize_pkg "$PARSE_OUT_B" "$MOD_B"
+# Upstream has no parser benchmarks, so without this the parse comparison
+# degrades to one populated column and the headline parser numbers vanish
+# from the README. The parser package's API is identical across the two
+# refs, so the benchmark file compiles on either side once its import path
+# is rewritten.
+#
+# Deliberately parse-only. plan_bench_test.go exists in BOTH refs with
+# different contents — this fork's version calls ExecutePlanAppend, which
+# upstream does not have, so copying it across would fail to compile.
+# Widening this to "any *_bench_test.go" would break the plan group.
+PARSE_BENCH="language/parser/parser_bench_test.go"
+if [ -f "$WT_A/$PARSE_BENCH" ] && [ ! -f "$WT_B/$PARSE_BENCH" ]; then
+    sed "s|$MOD_A|$MOD_B|g" "$WT_A/$PARSE_BENCH" > "$WT_B/$PARSE_BENCH"
+    err "copied $PARSE_BENCH into $SHORT_B (module rewrite)"
+elif [ -f "$WT_B/$PARSE_BENCH" ] && [ ! -f "$WT_A/$PARSE_BENCH" ]; then
+    sed "s|$MOD_B|$MOD_A|g" "$WT_B/$PARSE_BENCH" > "$WT_A/$PARSE_BENCH"
+    err "copied $PARSE_BENCH into $SHORT_A (module rewrite)"
 fi
 
-# Strip the variant prefix so a per-tier benchstat run pairs benchmarks
-# by their shared suffix.
-strip_plan_prefix() {
-    sed -i \
-        -e 's/PlannedAppend_/Execute_/g' \
-        -e 's/PlannedExecute_/Execute_/g' \
-        -e 's/UncachedExecute_/Execute_/g' \
-        "$1"
+# ----------------------------------------------------------- discovery
+discover() { # <worktree> <pkg> -> benchmark names
+    (cd "$1" && go test -list='^Benchmark' "$2" 2>/dev/null) | grep -E '^Benchmark' || true
 }
 
-run_solo_tiers() {
-    local short=$1 wt=$2
-    local uncached=$3 planned=$4 append=$5
-    err "==> per-tier benchmarks ($short) — solo (other ref lacks plan)"
-    run_bench "$wt" "$PLAN_ONLY_UNCACHED"     "./" "$uncached"
-    run_bench "$wt" "$PLAN_ONLY_PLANNED"      "./" "$planned"
-    run_bench "$wt" "$PLAN_ONLY_APPEND"       "./" "$append"
-    strip_plan_prefix "$uncached"
-    strip_plan_prefix "$planned"
-    strip_plan_prefix "$append"
+err "discovering benchmarks..."
+declare -A HAVE_A HAVE_B GROUP_OF
+ALL_KEYS=()
+for pkg in "${PACKAGES[@]}"; do
+    names=$( { discover "$WT_A" "$pkg"; discover "$WT_B" "$pkg"; } | sort -u )
+    [ -n "$names" ] || continue
+    while read -r b; do
+        [ -n "$b" ] || continue
+        ALL_KEYS+=("$pkg|$b")
+    done <<<"$names"
+    while read -r b; do [ -n "$b" ] && HAVE_A["$pkg|$b"]=1; done < <(discover "$WT_A" "$pkg")
+    while read -r b; do [ -n "$b" ] && HAVE_B["$pkg|$b"]=1; done < <(discover "$WT_B" "$pkg")
+done
+[ ${#ALL_KEYS[@]} -gt 0 ] || die "no benchmarks found in either ref"
+
+# Assign each benchmark to a group. Unmatched -> other-<pkg>.
+GROUP_ORDER=()
+declare -A GROUP_PKG GROUP_LIST
+note_group() { # <name> <pkg>
+    if [ -z "${GROUP_PKG[$1]:-}" ]; then GROUP_ORDER+=("$1"); GROUP_PKG[$1]=$2; fi
 }
-
-if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
-    err "==> plan benchmarks ($SHORT_A)"
-    run_bench "$WT_A" "$PLAN_AB_PATTERN" "./" "$PLAN_OUT_A"
-    err "==> plan benchmarks ($SHORT_B)"
-    run_bench "$WT_B" "$PLAN_AB_PATTERN" "./" "$PLAN_OUT_B"
-    # Normalize pkg: lines so benchstat can pair across module paths.
-    normalize_pkg "$PLAN_OUT_A" "$MOD_A"
-    normalize_pkg "$PLAN_OUT_B" "$MOD_B"
-elif [ "$PLAN_A" = "1" ]; then
-    run_solo_tiers "$SHORT_A" "$WT_A" \
-        "$PLAN_SOLO_UNCACHED_A" "$PLAN_SOLO_PLANNED_A" \
-        "$PLAN_SOLO_APPEND_A"
-elif [ "$PLAN_B" = "1" ]; then
-    run_solo_tiers "$SHORT_B" "$WT_B" \
-        "$PLAN_SOLO_UNCACHED_B" "$PLAN_SOLO_PLANNED_B" \
-        "$PLAN_SOLO_APPEND_B"
-fi
-
-# summary_table renders an N-column markdown table from benchstat's CSV
-# output. Args: title label1 file1 label2 file2 [label3 file3 ...].
-# Cells after the first column include the inline "vs base" delta.
-summary_table() {
-    local title=$1
-    shift
-    local labels=() files=()
-    while [ $# -ge 2 ]; do
-        labels+=("$1")
-        files+=("$2")
-        shift 2
+pkg_slug() { # ./language/parser/ -> language-parser ; ./ -> root
+    local p=${1#./}; p=${p%/}
+    [ -z "$p" ] && { echo root; return; }
+    echo "${p//\//-}"
+}
+for key in "${ALL_KEYS[@]}"; do
+    pkg=${key%%|*}; name=${key#*|}
+    g=""
+    for def in "${GROUP_DEFS[@]}"; do
+        dn=${def%%::*}; rest=${def#*::}; dpkg=${rest%%::*}; dpat=${rest#*::}
+        [ "$dpkg" = "$pkg" ] || continue
+        if grep -qE "$dpat" <<<"$name"; then g=$dn; break; fi
     done
-    local n=${#files[@]}
-    local dir
-    dir=$(dirname "${files[0]}")
-    local basenames=()
-    local f
+    [ -n "$g" ] || g="other-$(pkg_slug "$pkg")"
+    note_group "$g" "$pkg"
+    GROUP_OF[$key]=$g
+    GROUP_LIST[$g]+="$name "
+done
+
+# Stable, readable member list for a group.
+group_members() { tr ' ' '\n' <<<"${GROUP_LIST[$1]}" | grep -v '^$' | sort; }
+
+# ---------------------------------------------------------------- --list
+if [ "$DO_LIST" = "1" ]; then
+    total=0
+    printf 'Benchmarks in %s (%s) and %s (%s)\n\n' "$REF_A" "$SHORT_A" "$REF_B" "$SHORT_B"
+    for g in "${GROUP_ORDER[@]}"; do
+        n=$(group_members "$g" | wc -l)
+        total=$((total + n))
+        printf '  %-16s %-22s %d benchmark(s)\n' "$g" "${GROUP_PKG[$g]}" "$n"
+        while read -r b; do
+            [ -n "$b" ] || continue
+            key="${GROUP_PKG[$g]}|$b"
+            mark="both "
+            [ -n "${HAVE_A[$key]:-}" ] && [ -z "${HAVE_B[$key]:-}" ] && mark="$SHORT_A only"
+            [ -z "${HAVE_A[$key]:-}" ] && [ -n "${HAVE_B[$key]:-}" ] && mark="$SHORT_B only"
+            printf '      %-52s %s\n' "$b" "$mark"
+        done < <(group_members "$g")
+        echo
+    done
+    printf 'Total: %d benchmarks across %d group(s). All are run by default.\n' \
+        "$total" "${#GROUP_ORDER[@]}"
+    for g in "${GROUP_ORDER[@]}"; do
+        case "$g" in other-*)
+            printf 'Note: %s holds benchmarks matching no group pattern. They still run;\n' "$g"
+            printf '      add a pattern to GROUP_DEFS in bin/perf to give them their own table.\n' ;;
+        esac
+    done
+    exit 0
+fi
+
+# ------------------------------------------------------------- selection
+SELECTED=()
+if [ -n "$BENCH_RE" ]; then
+    # Ad-hoc regex: one table per package that has a match.
+    for pkg in "${PACKAGES[@]}"; do
+        hits=""
+        for key in "${ALL_KEYS[@]}"; do
+            [ "${key%%|*}" = "$pkg" ] || continue
+            name=${key#*|}
+            grep -qE "$BENCH_RE" <<<"$name" && hits+="$name "
+        done
+        [ -n "$hits" ] || continue
+        g="match-$(pkg_slug "$pkg")"
+        GROUP_ORDER+=("$g"); GROUP_PKG[$g]=$pkg; GROUP_LIST[$g]=$hits
+        SELECTED+=("$g")
+    done
+    [ ${#SELECTED[@]} -gt 0 ] || die "no benchmark matches regex: $BENCH_RE"
+elif [ -n "$ONLY" ]; then
+    IFS=',' read -ra want <<<"$ONLY"
+    for w in "${want[@]}"; do
+        found=0
+        for g in "${GROUP_ORDER[@]}"; do [ "$g" = "$w" ] && { SELECTED+=("$g"); found=1; }; done
+        [ "$found" = "1" ] || die "unknown group '$w' — see bin/perf --list"
+    done
+else
+    SELECTED=("${GROUP_ORDER[@]}")
+fi
+
+SKIPPED=()
+for g in "${GROUP_ORDER[@]}"; do
+    case "$g" in match-*) continue ;; esac
+    keep=0
+    for s in "${SELECTED[@]}"; do [ "$s" = "$g" ] && keep=1; done
+    [ "$keep" = "1" ] || SKIPPED+=("$g")
+done
+
+# ---------------------------------------------------------------- running
+# Rewrites the "pkg:" line so benchstat can pair results across forks
+# whose module paths differ. Strips the ref's own module prefix rather
+# than keeping the last path segment: the fork and upstream module names
+# differ in their final segment (graphql-go vs graphql), and a
+# last-segment rule leaves the root package labelled differently on each
+# side, which makes benchstat refuse to pair them.
+normalize_pkg() { # <file> <module>
+    sed -i -E "s|^pkg: ${2}/|pkg: |; s|^pkg: ${2}\$|pkg: root|" "$1"
+}
+
+run_bench() { # <worktree> <pattern> <pkg> <out>
+    (cd "$1" && go test -run='^$' -bench="$2" -benchtime="$BENCHTIME" -count="$COUNT" "$3" 2>/dev/null) > "$4"
+}
+
+declare -A OUT_A OUT_B
+for g in "${SELECTED[@]}"; do
+    pkg=${GROUP_PKG[$g]}
+    pat="^($(group_members "$g" | paste -sd'|' -))\$"
+    OUT_A[$g]="$TMP/${SHORT_A}-${g}.txt"
+    OUT_B[$g]="$TMP/${SHORT_B}-${g}.txt"
+    err "==> $g ($(group_members "$g" | wc -l) benchmarks in $pkg)"
+    err "    $SHORT_A"; run_bench "$WT_A" "$pat" "$pkg" "${OUT_A[$g]}"
+    err "    $SHORT_B"; run_bench "$WT_B" "$pat" "$pkg" "${OUT_B[$g]}"
+    normalize_pkg "${OUT_A[$g]}" "$MOD_A"
+    normalize_pkg "${OUT_B[$g]}" "$MOD_B"
+done
+
+# -------------------------------------------------------------- render
+summary_table() {
+    local title=$1; shift
+    local labels=() files=()
+    while [ $# -ge 2 ]; do labels+=("$1"); files+=("$2"); shift 2; done
+    local dir; dir=$(dirname "${files[0]}")
+    local basenames=(); local f
     for f in "${files[@]}"; do basenames+=("$(basename "$f")"); done
 
     (cd "$dir" && benchstat -format csv "${basenames[@]}" 2>/dev/null) | \
@@ -246,22 +341,18 @@ summary_table() {
             if (v < 1)    return sprintf("%.2fms", v*1000)
             return sprintf("%.2fs", v)
         }
-        # Render base/val as a multiplier. >1x = faster than base, <1x = slower.
         function fmt_mult(m) {
             if (m >= 100) return sprintf("%.0fx", m)
             if (m >= 10)  return sprintf("%.1fx", m)
             return sprintf("%.2fx", m)
         }
-        # Convert a benchstat "vs base" percentage ("-19.50%") to the same
-        # multiplier fmt_mult expects. Used for the geomean row: each
-        # column geomean covers only the benchmarks present in that column,
-        # so when a ref lacks some benchmarks the two column geomeans are
-        # over different sets and dividing them is meaningless. benchstat
-        # computes its delta over the paired subset, which is the honest
-        # comparison.
+        # benchstat "vs base" percent -> the same multiplier fmt_mult wants.
+        # Used for geomean: each column geomean covers only the benchmarks
+        # in that column, so when a ref lacks some, dividing the two column
+        # geomeans compares different sets. benchstat computes its delta
+        # over the paired subset, which is the honest number.
         function mult_from_delta(d,    p) {
-            gsub(/%/, "", d)
-            p = d + 0
+            gsub(/%/, "", d); p = d + 0
             if (p <= -100) return 0
             return 100 / (100 + p)
         }
@@ -273,14 +364,9 @@ summary_table() {
             if (!printed) {
                 print "**" title " — sec/op (× = base/val; >1× faster)**"
                 print ""
-                row = "| Benchmark"
-                sep = "|---"
-                for (i = 1; i <= n_labels; i++) {
-                    row = row " | " lbl[i]
-                    sep = sep "|---:"
-                }
-                print row " |"
-                print sep "|"
+                row = "| Benchmark"; sep = "|---"
+                for (i = 1; i <= n_labels; i++) { row = row " | " lbl[i]; sep = sep "|---:" }
+                print row " |"; print sep "|"
                 printed = 1
             }
             row = is_geo ? "| **" $1 "**" : "| " $1
@@ -289,24 +375,12 @@ summary_table() {
                 if (i == 1) {
                     cell = (base_val == 0) ? fmt($2) : fmt($2) " (1.00x)"
                 } else {
-                    # CSV layout per added file: val, ci, vs base, P
-                    # Field offsets: val_i = 4*i - 4, delta_i = 4*i - 2
-                    vfield = 4 * i - 4
-                    dfield = 4 * i - 2
-                    delta = $dfield
-                    val = $vfield + 0
-                    if (val == 0 || base_val == 0) {
-                        # No measurement, or no base to compare to: this
-                        # benchmark exists in only one ref.
-                        cell = fmt($vfield)
-                        unpaired = 1
-                    } else if (delta == "" || delta == "~") {
-                        cell = fmt($vfield) " (~)"
-                    } else if (is_geo) {
-                        cell = fmt($vfield) " (" fmt_mult(mult_from_delta(delta)) ")"
-                    } else {
-                        cell = fmt($vfield) " (" fmt_mult(base_val / val) ")"
-                    }
+                    vfield = 4 * i - 4; dfield = 4 * i - 2
+                    delta = $dfield; val = $vfield + 0
+                    if (val == 0 || base_val == 0) { cell = fmt($vfield); unpaired = 1 }
+                    else if (delta == "" || delta == "~") { cell = fmt($vfield) " (~)" }
+                    else if (is_geo) { cell = fmt($vfield) " (" fmt_mult(mult_from_delta(delta)) ")" }
+                    else { cell = fmt($vfield) " (" fmt_mult(base_val / val) ")" }
                 }
                 if (is_geo) cell = "**" cell "**"
                 row = row " | " cell
@@ -322,115 +396,59 @@ summary_table() {
     '
 }
 
-# emit_section: same arg shape as summary_table, plus a leading hint string.
-# Args: title hint label1 file1 label2 file2 ...
-emit_section() {
-    local title=$1 hint=$2
-    shift 2
+emit_section() { # <title> <labelA> <fileA> <labelB> <fileB>
+    local title=$1; shift
     local labels=() files=()
-    while [ $# -ge 2 ]; do
-        labels+=("$1")
-        files+=("$2")
-        shift 2
-    done
+    while [ $# -ge 2 ]; do labels+=("$1"); files+=("$2"); shift 2; done
     local f
     for f in "${files[@]}"; do
         if [ ! -s "$f" ]; then
-            printf "**%s**\n\n_Not run: %s_\n\n" "$title" "$hint"
-            return
+            printf '**%s**\n\n_Not run: no results._\n\n' "$title"; return
         fi
     done
-    local args=()
-    local i
-    for ((i=0; i<${#labels[@]}; i++)); do
-        args+=("${labels[$i]}" "${files[$i]}")
-    done
+    local args=(); local i
+    for ((i=0; i<${#labels[@]}; i++)); do args+=("${labels[$i]}" "${files[$i]}"); done
     summary_table "$title" "${args[@]}"
-    local dir
-    dir=$(dirname "${files[0]}")
+    local dir; dir=$(dirname "${files[0]}")
     local basenames=()
     for f in "${files[@]}"; do basenames+=("$(basename "$f")"); done
-    printf "\n<details>\n<summary>Full benchstat output</summary>\n\n\`\`\`\n"
+    printf '\n<details>\n<summary>Full benchstat output</summary>\n\n```\n'
     (cd "$dir" && benchstat "${basenames[@]}" 2>/dev/null)
-    printf "\`\`\`\n\n</details>\n\n"
+    printf '```\n\n</details>\n\n'
 }
 
 DATE=$(date -u +%Y-%m-%d)
-
-# Divergence at comparison time. In dirty mode ("." for B) the commit
-# counts are HEAD's — uncommitted changes have no commit to count.
 if [ "$USE_DIR_B" = "1" ]; then
-    CMP_B=$(git rev-parse --verify HEAD)
-    CMP_B_NOTE=" (counts are HEAD's; B also has uncommitted changes)"
+    CMP_B=$(git rev-parse HEAD); CMP_NOTE=" (counts are HEAD's; B also has uncommitted changes)"
 else
-    CMP_B="$SHA_B"
-    CMP_B_NOTE=""
+    CMP_B="$SHA_B"; CMP_NOTE=""
 fi
 AHEAD=$(git rev-list --count "$SHA_A".."$CMP_B")
 BEHIND=$(git rev-list --count "$CMP_B".."$SHA_A")
+RAN_COUNT=0
+for g in "${SELECTED[@]}"; do RAN_COUNT=$((RAN_COUNT + $(group_members "$g" | wc -l))); done
 
 TABLE=$(mktemp)
 {
-    printf "_Generated by \`bin/perf\` on %s. A=\`%s\` (%s), B=\`%s\` (%s). B is %s commits ahead of A, %s behind%s. count=%s, benchtime=%s._\n\n" \
-        "$DATE" "$REF_A" "$SHORT_A" "$REF_B" "$SHORT_B" \
-        "$AHEAD" "$BEHIND" "$CMP_B_NOTE" "$COUNT" "$BENCHTIME"
-
-    if [ "$PARSE_OK" = "1" ]; then
-        emit_section "Parser" "no parse benchmarks in either ref" \
-            "$SHORT_A" "$PARSE_OUT_A" \
-            "$SHORT_B" "$PARSE_OUT_B"
-    else
-        printf "**Parser**\n\n_Not run: no parser_bench_test.go in either ref._\n\n"
+    printf '_Generated by `bin/perf` on %s. A=`%s` (%s), B=`%s` (%s). B is %s commits ahead of A, %s behind%s. count=%s, benchtime=%s._\n\n' \
+        "$DATE" "$REF_A" "$SHORT_A" "$REF_B" "$SHORT_B" "$AHEAD" "$BEHIND" "$CMP_NOTE" "$COUNT" "$BENCHTIME"
+    printf '_%d benchmarks across %d group(s)' "$RAN_COUNT" "${#SELECTED[@]}"
+    if [ ${#SKIPPED[@]} -gt 0 ]; then
+        printf '; skipped by --only: %s' "$(printf '%s ' "${SKIPPED[@]}" | sed 's/ $//')"
     fi
-
-    if [ "$PLAN_A" = "1" ] && [ "$PLAN_B" = "1" ]; then
-        emit_section "Query plan / execute" "see below" \
-            "$SHORT_A" "$PLAN_OUT_A" \
-            "$SHORT_B" "$PLAN_OUT_B"
-    elif [ "$PLAN_A" = "1" ] || [ "$PLAN_B" = "1" ]; then
-        if [ "$PLAN_A" = "1" ]; then
-            SOLO_REF="$REF_A"; SOLO_SHORT="$SHORT_A"
-            UNCACHED="$PLAN_SOLO_UNCACHED_A"
-            PLANNED="$PLAN_SOLO_PLANNED_A"
-            APPEND="$PLAN_SOLO_APPEND_A"
-            OTHER_LABEL="B"
-        else
-            SOLO_REF="$REF_B"; SOLO_SHORT="$SHORT_B"
-            UNCACHED="$PLAN_SOLO_UNCACHED_B"
-            PLANNED="$PLAN_SOLO_PLANNED_B"
-            APPEND="$PLAN_SOLO_APPEND_B"
-            OTHER_LABEL="A"
-        fi
-        printf "**Query plan / execute**\n\n"
-        printf "_Only \`%s\` has \`plan_bench_test.go\`. The table below stacks three execution tiers on the supporting ref. \`uncached\` is the baseline (no plan caching, default executor). \`planned\` adds plan caching (default-on for adopters; the case for %s to merge plan support). \`+append\` adopts the resolver-side append API (opt-in, requires schema-author changes). Δ on each tier is vs the \`uncached\` baseline._\n\n" \
-            "$SOLO_REF" "$OTHER_LABEL"
-        emit_section "Execution tiers on $SOLO_SHORT" "missing per-tier output" \
-            "uncached"     "$UNCACHED" \
-            "planned"      "$PLANNED" \
-            "+append"      "$APPEND"
-    else
-        printf "**Query plan / execute**\n\n_Not run: neither ref has \`plan_bench_test.go\`._\n\n"
-    fi
+    printf '._\n\n'
+    for g in "${SELECTED[@]}"; do
+        emit_section "$g" "$SHORT_A" "${OUT_A[$g]}" "$SHORT_B" "${OUT_B[$g]}"
+    done
 } > "$TABLE"
 
-if [ "$UPDATE_README" = "0" ]; then
-    cat "$TABLE"
-    exit 0
-fi
+if [ "$UPDATE_README" = "0" ]; then cat "$TABLE"; exit 0; fi
 
 README="$REPO_ROOT/README.md"
-if [ ! -f "$README" ]; then
-    err "README.md not found; printing to stdout"
-    cat "$TABLE"
-    exit 0
-fi
-
-START="<!-- perf-start -->"
-END="<!-- perf-end -->"
-
+START="<!-- perf-start -->"; END="<!-- perf-end -->"
+if [ ! -f "$README" ]; then err "README.md not found; printing"; cat "$TABLE"; exit 0; fi
 if grep -q "$START" "$README" && grep -q "$END" "$README"; then
     awk -v start="$START" -v end="$END" -v table_file="$TABLE" '
-        BEGIN { in_section = 0 }
         index($0, start) { print; while ((getline line < table_file) > 0) print line; in_section = 1; next }
         index($0, end)   { in_section = 0; print; next }
         !in_section { print }
@@ -438,9 +456,5 @@ if grep -q "$START" "$README" && grep -q "$END" "$README"; then
     mv "$README.tmp" "$README"
     err "updated README.md between markers"
 else
-    err "no perf markers in README.md; please add a Performance section with:"
-    err "  $START"
-    err "  $END"
-    err "or run bin/perf <a> <b> --no-readme to print to stdout"
-    exit 1
+    die "no perf markers in README.md; add $START / $END, or use --no-readme"
 fi

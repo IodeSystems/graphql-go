@@ -88,12 +88,18 @@ Acted on: `#754` (unbounded parser recursion). Triaging it turned up a
 separate and more reachable problem — syntax-error formatting was
 quadratic in the error's column, so one malformed 80KB single-line query
 cost ~2.7s of CPU with no nesting involved. Fixed in `3a8f62e`. The
-recursion depth cap the issue actually proposes is **still open here**:
-the parser descends one frame per nesting level with no limit, so a
-sufficiently deep document can exhaust the goroutine stack, which is a
-fatal runtime error that `recover` cannot catch. Adding a cap rejects
-documents that parse today, so it needs a decision on the limit and on
-whether it is configurable.
+recursion depth cap the issue proposes followed in `c3e2c2c`:
+`ParseOptions.MaxDepth`, default `DefaultMaxDepth` (1000), negative
+disables it.
+
+Re-checked 2026-09-13; one new issue since the triage above.
+
+Acted on: `#758` — `ExecuteSubscription` leaks its producer goroutine when
+the subscriber cancels and stops reading, because the result send does not
+watch the context. Present here and reachable from gwag, whose
+`runSubscription` returns as soon as its context is cancelled. Fixed by
+guarding every send, not only the one upstream's `#760` guards; see the
+open-PR section.
 
 Not acted on: `#750` (return partial data alongside errors) reads as a
 feature request rather than a defect; the executor already emits partial
@@ -133,3 +139,22 @@ Not worth taking:
 - `#639`, `#428` (tracing), `#559` (auto-bind), `#589`, `#552`, `#473`,
   `#475`, `#398`, `#479`, `#277`, `#253` — features and reworks, not
   fixes. Revisit only if we want the capability.
+
+### Opened since, triaged 2026-09-13
+
+- `#760` (fixes `#758`), **adapted**. It wraps the event-loop send in a
+  select on `p.Context.Done()`. The single-value send and every
+  error-path send have the same bare send and leak the same way; all were
+  reproduced here before the fix. This fork routes every send through one
+  context-aware `send`, with regression tests for the event, single-value
+  and resolver-error paths. `#759` is the same author's closed first
+  attempt.
+- `#757` (`BindFields` int16/uint kinds), **adapted in part**. Taken:
+  `int16`, `uint8`, `uint16` bind as `Int`, scalar and list. Before this, a
+  scalar of those kinds bound as `String` and a slice of them panicked in
+  `BindFields`. Not taken: `uint`, `uint32`, `uint64`. They exceed Int's 32
+  bits and `coerceInt` returns null out of range, so binding them as `Int`
+  turns a large value that serializes today as a `String` into `null`.
+  The test-name typo fix in `quoted_or_list_internal_test.go` is taken.
+- `#756` (parser depth cap), **already here** as `c3e2c2c`, configurable
+  where the PR hardcodes 500.

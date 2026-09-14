@@ -33,6 +33,8 @@ Source-compatible except for one API removal, plus two defaults that change beha
 
 Two further differences need no opt-in and should only ever return more data, never less: introspection returns `__schema.types` and `__type.fields` in sorted order (upstream's ordering is map-random), and `DefaultResolveFn` resolves fields promoted from embedded structs following Go's own promotion rules (upstream returns null for them).
 
+`BindFields` binds `int16`, `uint8` and `uint16` struct fields as `Int` where upstream binds them as `String`, and binds slices of them as `[Int]` where upstream panics. A schema built this way changes type for those fields. `uint`, `uint32` and `uint64` stay `String`, because values above 2³¹−1 do not fit `Int`.
+
 ### Documentation
 
 godoc: https://pkg.go.dev/github.com/IodeSystems/graphql-go/v2

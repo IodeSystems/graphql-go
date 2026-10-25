@@ -144,6 +144,13 @@ type argPlan struct {
 	dynamicArgASTs []*ast.Argument
 }
 
+// IsMutation reports whether the planned operation is a mutation, so a
+// transport can refuse it before executing (GraphQL over HTTP forbids
+// mutations on GET).
+func (p *Plan) IsMutation() bool {
+	return p.isMutation
+}
+
 // PlanQuery walks the document, picks the named operation (or the
 // only one), pre-resolves fragments + the entire selection tree, and
 // returns a Plan ready to be executed against the same schema.

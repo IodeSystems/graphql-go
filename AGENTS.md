@@ -32,6 +32,8 @@ No linter, formatter, build step, or codegen. `go fmt` and `go vet` are the only
 - **`ExecutePlanAppend(plan, params, dst []byte) ([]byte, []FormattedError)`** — zero-allocation JSON emission. Writes `{"data":...,"errors":[...]}` directly to `dst`. No intermediate map tree.
 - **`Field.ResolveAppend`** — opt-in resolver that writes JSON bytes directly. Skips Serialize, leafEmitter, and result boxing. Extensions hooks do NOT fire on ResolveAppend fields.
 - **`ScalarConfig.AppendJSON`** — optional hook for custom scalars to emit JSON bytes directly.
+- **`PlanCacheOptions.Rules`** — extra validation rules run after `SpecifiedRules` in the same pass; a rejection is cached like any validation error, so a rule costs nothing on a cache hit (depth limits, introspection bans).
+- **`Plan.IsMutation()`** — whether the planned operation is a mutation, so a transport can refuse it on GET before executing.
 
 ### ExecuteParams flags (append-mode)
 

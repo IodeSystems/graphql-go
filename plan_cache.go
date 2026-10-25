@@ -30,6 +30,9 @@ import (
 // The cache is safe for concurrent use.
 type PlanCache struct {
 	opts PlanCacheOptions
+	// rules is SpecifiedRules + opts.Rules, or nil (= SpecifiedRules)
+	// when there are no extra rules.
+	rules []ValidationRuleFn
 
 	mu      sync.Mutex
 	entries map[string]*list.Element
@@ -50,6 +53,11 @@ type PlanCacheOptions struct {
 	MaxEntries    int
 	MaxQueryBytes int
 	Normalize     bool
+	// Rules are validation rules run after SpecifiedRules, in the same
+	// pass. A rejection is cached like any validation error, so a rule
+	// costs nothing on a cache hit — the place for depth limits or an
+	// introspection ban.
+	Rules []ValidationRuleFn
 }
 
 const (
@@ -90,8 +98,13 @@ func NewPlanCache(opts PlanCacheOptions) *PlanCache {
 	if opts.MaxQueryBytes <= 0 {
 		opts.MaxQueryBytes = defaultPlanCacheMaxQueryBytes
 	}
+	var rules []ValidationRuleFn
+	if len(opts.Rules) > 0 {
+		rules = append(append(rules, SpecifiedRules...), opts.Rules...)
+	}
 	return &PlanCache{
 		opts:    opts,
+		rules:   rules,
 		entries: make(map[string]*list.Element, opts.MaxEntries),
 		order:   list.New(),
 	}
@@ -122,11 +135,11 @@ func (c *PlanCache) Get(schema *Schema, query, operationName string) PlanResult 
 		// Nil-receiver convenience: caller can pass nil and still
 		// get a working (uncached) path. Useful for tests +
 		// "off by default" deployments.
-		return planAndValidate(schema, query, operationName)
+		return planAndValidate(schema, query, operationName, nil)
 	}
 	if !c.shouldCache(len(query)) {
 		// Over-cap queries bypass the cache entirely.
-		return planAndValidate(schema, query, operationName)
+		return planAndValidate(schema, query, operationName, c.rules)
 	}
 
 	if !c.opts.Normalize {
@@ -135,7 +148,7 @@ func (c *PlanCache) Get(schema *Schema, query, operationName string) PlanResult 
 		if pr, ok := c.lookup(schema, key); ok {
 			return pr
 		}
-		pr := planAndValidate(schema, query, operationName)
+		pr := planAndValidate(schema, query, operationName, c.rules)
 		c.store(schema, key, pr)
 		return pr
 	}
@@ -173,7 +186,7 @@ func (c *PlanCache) Get(schema *Schema, query, operationName string) PlanResult 
 		pr.SynthArgs = synthArgs
 		return pr
 	}
-	if vr := ValidateDocument(schema, normDoc, nil); !vr.IsValid {
+	if vr := ValidateDocument(schema, normDoc, c.rules); !vr.IsValid {
 		pr := PlanResult{Errors: vr.Errors}
 		c.store(schema, cacheKey, pr)
 		return pr
@@ -261,14 +274,14 @@ func (c *PlanCache) store(schema *Schema, key string, pr PlanResult) {
 // planAndValidate is the cache-miss path: parse, validate, plan,
 // returning a PlanResult ready to store. Exposed as a free function
 // (no receiver) so the nil-receiver Get can fall through to it
-// without re-implementing the pipeline.
-func planAndValidate(schema *Schema, query, operationName string) PlanResult {
+// without re-implementing the pipeline. nil rules = SpecifiedRules.
+func planAndValidate(schema *Schema, query, operationName string, rules []ValidationRuleFn) PlanResult {
 	src := source.NewSource(&source.Source{Body: []byte(query), Name: "GraphQL request"})
 	doc, parseErr := parser.Parse(parser.ParseParams{Source: src})
 	if parseErr != nil {
 		return PlanResult{Errors: gqlerrors.FormatErrors(parseErr)}
 	}
-	if vr := ValidateDocument(schema, doc, nil); !vr.IsValid {
+	if vr := ValidateDocument(schema, doc, rules); !vr.IsValid {
 		return PlanResult{Errors: vr.Errors}
 	}
 	plan, err := PlanQuery(schema, doc, operationName)

@@ -3,6 +3,7 @@ package graphql
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -149,18 +150,49 @@ func coerceInt(value interface{}) interface{} {
 	return nil
 }
 
+// parseIntValue is Int input coercion (spec: Scalars › Int › Input
+// Coercion; graphql-js parseValue). Unlike coerceInt (result coercion),
+// it accepts only integral numbers in 32-bit signed range: a fractional
+// number, a string or a boolean is rejected (nil), never truncated or
+// converted. An integral float such as JSON 2.0 is accepted, as in
+// graphql-js, which cannot tell 2.0 from 2.
+func parseIntValue(value interface{}) interface{} {
+	switch value := value.(type) {
+	case bool, *bool, string, *string:
+		return nil
+	case float32:
+		return parseIntValue(float64(value))
+	case *float32:
+		if value == nil {
+			return nil
+		}
+		return parseIntValue(float64(*value))
+	case float64:
+		if value != math.Trunc(value) {
+			return nil // fractional, NaN or ±Inf
+		}
+		return coerceInt(value)
+	case *float64:
+		if value == nil {
+			return nil
+		}
+		return parseIntValue(*value)
+	}
+	return coerceInt(value)
+}
+
 // Int is the GraphQL Integer type definition.
 var Int = NewScalar(ScalarConfig{
 	Name: "Int",
 	Description: "The `Int` scalar type represents non-fractional signed whole numeric " +
 		"values. Int can represent values between -(2^31) and 2^31 - 1. ",
 	Serialize:  coerceInt,
-	ParseValue: coerceInt,
+	ParseValue: parseIntValue,
 	ParseLiteral: func(valueAST ast.Value) interface{} {
 		switch valueAST := valueAST.(type) {
 		case *ast.IntValue:
-			if intValue, err := strconv.Atoi(valueAST.Value); err == nil {
-				return intValue
+			if intValue, err := strconv.ParseInt(valueAST.Value, 10, 32); err == nil {
+				return int(intValue)
 			}
 		}
 		return nil
@@ -282,6 +314,28 @@ func coerceFloat(value interface{}) interface{} {
 	return nil
 }
 
+// parseFloatValue is Float input coercion (graphql-js parseValue): only
+// finite numbers are accepted. A string or a boolean is rejected (nil),
+// unlike coerceFloat (result coercion), which converts them.
+func parseFloatValue(value interface{}) interface{} {
+	switch value.(type) {
+	case bool, *bool, string, *string:
+		return nil
+	}
+	f := coerceFloat(value)
+	switch v := f.(type) {
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil
+		}
+	case float32:
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return nil
+		}
+	}
+	return f
+}
+
 // Float is the GraphQL float type definition.
 var Float = NewScalar(ScalarConfig{
 	Name: "Float",
@@ -289,7 +343,7 @@ var Float = NewScalar(ScalarConfig{
 		"values as specified by " +
 		"[IEEE 754](http://en.wikipedia.org/wiki/IEEE_floating_point). ",
 	Serialize:  coerceFloat,
-	ParseValue: coerceFloat,
+	ParseValue: parseFloatValue,
 	ParseLiteral: func(valueAST ast.Value) interface{} {
 		switch valueAST := valueAST.(type) {
 		case *ast.FloatValue:
@@ -497,6 +551,49 @@ var Boolean = NewScalar(ScalarConfig{
 	AppendJSON: appendBoolJSON,
 })
 
+// parseIDValue is ID input coercion (spec: Scalars › ID › Input
+// Coercion; graphql-js parseValue): a string, or an integral number,
+// which becomes its decimal string. A fractional number, a boolean or
+// any other value is rejected (nil).
+func parseIDValue(value interface{}) interface{} {
+	switch value := value.(type) {
+	case string:
+		return value
+	case *string:
+		if value == nil {
+			return nil
+		}
+		return *value
+	case bool, *bool:
+		return nil
+	case float32:
+		return parseIDValue(float64(value))
+	case *float32:
+		if value == nil {
+			return nil
+		}
+		return parseIDValue(float64(*value))
+	case float64:
+		if value != math.Trunc(value) {
+			return nil // fractional, NaN or ±Inf
+		}
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	case *float64:
+		if value == nil {
+			return nil
+		}
+		return parseIDValue(*value)
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%d", value)
+	case *int, *int8, *int16, *int32, *int64, *uint, *uint8, *uint16, *uint32, *uint64:
+		if isNullish(value) {
+			return nil
+		}
+		return fmt.Sprintf("%d", reflect.ValueOf(value).Elem().Interface())
+	}
+	return nil
+}
+
 // ID is the GraphQL id type definition
 var ID = NewScalar(ScalarConfig{
 	Name: "ID",
@@ -506,7 +603,7 @@ var ID = NewScalar(ScalarConfig{
 		"When expected as an input type, any string (such as `\"4\"`) or integer " +
 		"(such as `4`) input value will be accepted as an ID.",
 	Serialize:  coerceString,
-	ParseValue: coerceString,
+	ParseValue: parseIDValue,
 	ParseLiteral: func(valueAST ast.Value) interface{} {
 		switch valueAST := valueAST.(type) {
 		case *ast.IntValue:

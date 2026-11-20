@@ -1271,7 +1271,7 @@ func ProvidedNonNullArgumentsRule(context *ValidationContext) *ValidationRuleIns
 						for _, argDef := range fieldDef.Args {
 							argAST, _ := argASTMap[argDef.Name()]
 							if argAST == nil {
-								if argDefType, ok := argDef.Type.(*NonNull); ok && argDef.DefaultValue == nil {
+								if argDefType, ok := argDef.Type.(*NonNull); ok && !hasNonNullDefault(argDef.DefaultValue) {
 									fieldName := ""
 									if fieldAST.Name != nil {
 										fieldName = fieldAST.Name.Value
@@ -1312,7 +1312,7 @@ func ProvidedNonNullArgumentsRule(context *ValidationContext) *ValidationRuleIns
 						for _, argDef := range directiveDef.Args {
 							argAST, _ := argASTMap[argDef.Name()]
 							if argAST == nil {
-								if argDefType, ok := argDef.Type.(*NonNull); ok && argDef.DefaultValue == nil {
+								if argDefType, ok := argDef.Type.(*NonNull); ok && !hasNonNullDefault(argDef.DefaultValue) {
 									directiveName := ""
 									if directiveAST.Name != nil {
 										directiveName = directiveAST.Name.Value
@@ -1761,10 +1761,10 @@ func isValidLiteralValue(ttype Input, valueAST ast.Value) (bool, []string) {
 		itemType, _ := ttype.OfType.(Input)
 		if valueAST, ok := valueAST.(*ast.ListValue); ok {
 			messagesReduce := []string{}
-			for _, value := range valueAST.Values {
+			for i, value := range valueAST.Values {
 				_, messages := isValidLiteralValue(itemType, value)
-				for idx, message := range messages {
-					messagesReduce = append(messagesReduce, fmt.Sprintf(`In element #%v: %v`, idx+1, message))
+				for _, message := range messages {
+					messagesReduce = append(messagesReduce, fmt.Sprintf(`In element #%v: %v`, i, message))
 				}
 			}
 			return (len(messagesReduce) == 0), messagesReduce

@@ -64,3 +64,40 @@ func TestInputObject_OmittedNonNullFieldWithDefault(t *testing.T) {
 		t.Error("{x: null} into Int! accepted")
 	}
 }
+
+// "In element #N" names the element's index (0-based, as graphql-js
+// does and as the ported rule tests expect: ["one", 2] reports #1), not
+// the message's position.
+func TestListLiteral_ErrorNamesElementIndex(t *testing.T) {
+	schema := nullTestSchema(t)
+	res := graphql.Do(graphql.Params{Schema: schema, RequestString: `{ f(list: ["x", 1, "y"]) }`})
+	want := `Argument "list" has invalid value ["x", 1, "y"].` + "\n" +
+		`In element #0: Expected type "Int", found "x".` + "\n" +
+		`In element #2: Expected type "Int", found "y".`
+	if !hasErrorMessage(res.Errors, want) {
+		t.Errorf("want %q, got %v", want, res.Errors)
+	}
+	res = graphql.Do(graphql.Params{Schema: schema, RequestString: `query($l: [Int]) { f(list: $l) }`,
+		VariableValues: map[string]interface{}{"l": []interface{}{"x", 1, "y"}}})
+	want = `Variable "$l" got invalid value ["x",1,"y"].` + "\n" +
+		`In element #0: Expected type "Int", found "x".` + "\n" +
+		`In element #2: Expected type "Int", found "y".`
+	if !hasErrorMessage(res.Errors, want) {
+		t.Errorf("want %q, got %v", want, res.Errors)
+	}
+}
+
+// A null default cannot satisfy a non-null argument.
+func TestExplicitNullDefault_NonNullArgStillRequired(t *testing.T) {
+	schema := nullTestSchema(t)
+	res := graphql.Do(graphql.Params{Schema: schema, RequestString: `{ nd }`})
+	want := `Field "nd" argument "a" of type "Int!" is required but not provided.`
+	if !hasErrorMessage(res.Errors, want) {
+		t.Errorf("want %q, got %v", want, res.Errors)
+	}
+	res = graphql.Do(graphql.Params{Schema: schema, RequestString: `query($v: Int) { nd(a: $v) }`})
+	want = `Variable "$v" of type "Int" used in position expecting type "Int!".`
+	if !hasErrorMessage(res.Errors, want) {
+		t.Errorf("want %q, got %v", want, res.Errors)
+	}
+}

@@ -160,16 +160,28 @@ func coerceInt(value interface{}) interface{} {
 	return nil
 }
 
-// parseIntValue is Int input coercion (spec: Scalars › Int › Input
-// Coercion; graphql-js parseValue). Unlike coerceInt (result coercion),
-// it accepts only integral numbers in 32-bit signed range: a fractional
-// number, a string or a boolean is rejected (nil), never truncated or
-// converted. An integral float such as JSON 2.0 is accepted, as in
-// graphql-js, which cannot tell 2.0 from 2.
+// parseIntValue is Int input coercion (variables; spec: Scalars › Int ›
+// Input Coercion). It accepts what converts to a 32-bit signed integer
+// without loss: an integral number in range, including an integral
+// float such as JSON 2.0 and a json.Number, or a string in JSON number
+// syntax that denotes such an integer ("2", "-3", "2.0", "1e3"). A
+// fractional number, an out-of-range number, a boolean or any other
+// string is rejected (nil), never truncated or converted. Literals in
+// the query text stay spec-strict (ParseLiteral).
 func parseIntValue(value interface{}) interface{} {
 	switch value := value.(type) {
-	case bool, *bool, string, *string:
+	case bool, *bool:
 		return nil
+	case string:
+		if !isJSONNumberSyntax(value) {
+			return nil
+		}
+		return parseIntValue(json.Number(value))
+	case *string:
+		if value == nil {
+			return nil
+		}
+		return parseIntValue(*value)
 	case float32:
 		return parseIntValue(float64(value))
 	case *float32:
@@ -200,6 +212,69 @@ func parseIntValue(value interface{}) interface{} {
 		return parseIntValue(f)
 	}
 	return coerceInt(value)
+}
+
+// isJSONNumberSyntax reports whether s is a number in JSON syntax
+// (RFC 8259 §6): an optional minus, an integer part without leading
+// zeros, an optional fraction and an optional exponent. Whitespace, a
+// leading plus, hex, underscores, "NaN" and "Inf" are not numbers.
+func isJSONNumberSyntax(s string) bool {
+	i, n := 0, len(s)
+	if i < n && s[i] == '-' {
+		i++
+	}
+	switch {
+	case i < n && s[i] == '0':
+		i++
+	case i < n && s[i] >= '1' && s[i] <= '9':
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	default:
+		return false
+	}
+	if i < n && s[i] == '.' {
+		i++
+		start := i
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == start {
+			return false
+		}
+	}
+	if i < n && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < n && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		start := i
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == start {
+			return false
+		}
+	}
+	return i == n
+}
+
+// isJSONIntegerSyntax reports whether s is an optional minus followed
+// by digits only, with no leading zero.
+func isJSONIntegerSyntax(s string) bool {
+	i := 0
+	if i < len(s) && s[i] == '-' {
+		i++
+	}
+	if i == len(s) || (s[i] == '0' && i+1 != len(s)) {
+		return false
+	}
+	for ; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Int is the GraphQL Integer type definition.
@@ -341,13 +416,25 @@ func coerceFloat(value interface{}) interface{} {
 	return nil
 }
 
-// parseFloatValue is Float input coercion (graphql-js parseValue): only
-// finite numbers are accepted. A string or a boolean is rejected (nil),
-// unlike coerceFloat (result coercion), which converts them.
+// parseFloatValue is Float input coercion (variables): a finite number,
+// including a json.Number, or a string in JSON number syntax that
+// parses to a finite float ("2.5", "1e3"). A boolean, "NaN", "Inf",
+// an overflowing value and any other string are rejected (nil).
+// Literals in the query text stay spec-strict (ParseLiteral).
 func parseFloatValue(value interface{}) interface{} {
-	switch value.(type) {
-	case bool, *bool, string, *string:
+	switch v := value.(type) {
+	case bool, *bool:
 		return nil
+	case string:
+		if !isJSONNumberSyntax(v) {
+			return nil
+		}
+		value = json.Number(v)
+	case *string:
+		if v == nil {
+			return nil
+		}
+		return parseFloatValue(*v)
 	}
 	f := coerceFloat(value)
 	switch v := f.(type) {
@@ -580,8 +667,10 @@ var Boolean = NewScalar(ScalarConfig{
 
 // parseIDValue is ID input coercion (spec: Scalars › ID › Input
 // Coercion; graphql-js parseValue): a string, or an integral number,
-// which becomes its decimal string. A fractional number, a boolean or
-// any other value is rejected (nil).
+// which becomes its decimal string. A json.Number in integer syntax is
+// kept digit for digit; one with a fraction or exponent is accepted
+// when it is integral and exact as a float64 (|n| <= 2^53). A
+// fractional number, a boolean or any other value is rejected (nil).
 func parseIDValue(value interface{}) interface{} {
 	switch value := value.(type) {
 	case string:
@@ -610,6 +699,15 @@ func parseIDValue(value interface{}) interface{} {
 			return nil
 		}
 		return parseIDValue(*value)
+	case json.Number:
+		if isJSONIntegerSyntax(string(value)) {
+			return string(value)
+		}
+		f, err := value.Float64()
+		if err != nil || math.Abs(f) > 1<<53 {
+			return nil
+		}
+		return parseIDValue(f)
 	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 		return fmt.Sprintf("%d", value)
 	case *int, *int8, *int16, *int32, *int64, *uint, *uint8, *uint16, *uint32, *uint64:

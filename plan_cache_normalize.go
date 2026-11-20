@@ -2,7 +2,6 @@ package graphql
 
 import (
 	"fmt"
-	"hash/fnv"
 	"strconv"
 
 	"github.com/IodeSystems/graphql-go/v2/language/ast"
@@ -134,8 +133,7 @@ func normalizeDocument(schema *Schema, doc *ast.Document, operationName string) 
 // names, so two queries that differ only in those literals hash the
 // same; literals that stayed in place are hashed by kind and content.
 func fingerprintDocument(doc *ast.Document, op *ast.OperationDefinition, operationName string) string {
-	h := fnv.New64a()
-	w := fingerprintWriter{h: h, fragments: collectFragmentDefs(doc)}
+	w := fingerprintWriter{h: fnvOffset64, fragments: collectFragmentDefs(doc)}
 	w.writeString("OP:")
 	w.writeString(string(op.Operation))
 	w.writeByte(0)
@@ -144,7 +142,7 @@ func fingerprintDocument(doc *ast.Document, op *ast.OperationDefinition, operati
 	w.writeVariableDefs(op.VariableDefinitions)
 	w.writeDirectives(op.Directives)
 	w.writeSelectionSet(op.SelectionSet)
-	return strconv.FormatUint(h.Sum64(), 16)
+	return strconv.FormatUint(w.h, 16)
 }
 
 func collectFragmentDefs(doc *ast.Document) map[string]*ast.FragmentDefinition {
@@ -163,13 +161,32 @@ func collectFragmentDefs(doc *ast.Document) map[string]*ast.FragmentDefinition {
 // spread-reachable structure participates in the cache key), but we
 // don't rewrite anything.
 type fingerprintWriter struct {
-	h         interface{ Write([]byte) (int, error) }
+	h uint64 // FNV-1a state
+
 	fragments map[string]*ast.FragmentDefinition
 	visited   map[string]bool
 }
 
-func (w *fingerprintWriter) writeString(s string) { _, _ = w.h.Write([]byte(s)) }
-func (w *fingerprintWriter) writeByte(b byte)     { _, _ = w.h.Write([]byte{b}) }
+// FNV-1a, 64-bit, the same function as hash/fnv's New64a. Inlined so a
+// write does not box a []byte through the hash.Hash interface: that
+// cost one allocation per byte and per string written, on every
+// normalized PlanCache.Get.
+const (
+	fnvOffset64 = 14695981039346656037
+	fnvPrime64  = 1099511628211
+)
+
+func (w *fingerprintWriter) writeString(s string) {
+	for i := 0; i < len(s); i++ {
+		w.h ^= uint64(s[i])
+		w.h *= fnvPrime64
+	}
+}
+
+func (w *fingerprintWriter) writeByte(b byte) {
+	w.h ^= uint64(b)
+	w.h *= fnvPrime64
+}
 
 func (w *fingerprintWriter) writeVariableDefs(defs []*ast.VariableDefinition) {
 	w.writeString("VD(")
@@ -455,16 +472,15 @@ func (c *normCtx) tryExtract(value ast.Value, expected Input) (ast.Value, bool) 
 	if expected == nil {
 		return value, false
 	}
+	// Coerce literal once at extract time; the tree has no variables.
 	// An invalid literal stays in place so validation reports it
 	// against the literal. Extracted, it would pass validation as a
 	// variable: `[Int!]` given `[null]` would coerce to [nil], and
 	// `[Int]` given `[1, "x"]` to [1, nil].
-	if ok, _ := isValidLiteralValue(expected, value); !ok {
+	coerced, valid := coerceLiteral(value, expected)
+	if !valid {
 		return value, false
 	}
-	// Coerce literal once at extract time. We pass nil variableValues
-	// because we already know the value tree contains no variables.
-	coerced := valueFromAST(value, expected, nil)
 	if coerced == nil {
 		// valueFromAST returns nil for literals it can't coerce
 		// (typically a type mismatch the validator should have caught
@@ -479,6 +495,87 @@ func (c *normCtx) tryExtract(value ast.Value, expected Input) (ast.Value, bool) 
 		Type:     typeASTFromGoType(expected),
 	}))
 	return ast.NewVariable(&ast.Variable{Name: ast.NewName(&ast.Name{Value: name})}), true
+}
+
+// coerceLiteral returns valueFromAST(v, t, nil) for a variable-free
+// literal, and whether isValidLiteralValue(t, v) accepts it. It runs on
+// every normalized PlanCache.Get, hits included, so it does both in one
+// pass: each scalar is parsed once and nothing is allocated for the
+// check. TestCoerceLiteralMatches pins it to the two functions.
+func coerceLiteral(v ast.Value, t Input) (interface{}, bool) {
+	if nn, ok := t.(*NonNull); ok {
+		if nn.Error() != nil || v == nil || isNullLiteral(v) {
+			return nil, false
+		}
+		inner, _ := nn.OfType.(Input)
+		return coerceLiteral(v, inner)
+	}
+	if v == nil || isNullLiteral(v) {
+		return nil, true
+	}
+	switch t := t.(type) {
+	case *List:
+		item, _ := t.OfType.(Input)
+		lv, ok := v.(*ast.ListValue)
+		if !ok {
+			// A non-list value is a list of one.
+			val, valid := coerceLiteral(v, item)
+			return []interface{}{val}, valid
+		}
+		values := make([]interface{}, 0, len(lv.Values))
+		valid := true
+		for _, itemAST := range lv.Values {
+			val, ok := coerceLiteral(itemAST, item)
+			valid = valid && ok
+			values = append(values, val)
+		}
+		return values, valid
+	case *InputObject:
+		ov, ok := v.(*ast.ObjectValue)
+		if !ok {
+			return nil, false
+		}
+		fields := t.Fields()
+		valid := true
+		for _, of := range ov.Fields {
+			if of == nil || of.Name == nil || fields[of.Name.Value] == nil {
+				valid = false
+			}
+		}
+		obj := map[string]interface{}{}
+		for name, field := range fields {
+			var fieldAST *ast.ObjectField
+			for _, of := range ov.Fields {
+				if of != nil && of.Name != nil && of.Name.Value == name {
+					fieldAST = of // last one wins, as in valueFromAST
+				}
+			}
+			if fieldAST == nil {
+				if _, nonNull := field.Type.(*NonNull); nonNull && !hasNonNullDefault(field.DefaultValue) {
+					valid = false
+				}
+				if def, hasDefault := defaultValue(field.DefaultValue); hasDefault {
+					obj[name] = def
+				}
+				continue
+			}
+			val, ok := coerceLiteral(fieldAST.Value, field.Type)
+			valid = valid && ok
+			if isNullLiteral(fieldAST.Value) {
+				obj[name] = nil
+			} else if !isNullish(val) {
+				obj[name] = val
+			}
+		}
+		return obj, valid
+	case *Scalar:
+		parsed := t.ParseLiteral(v)
+		return parsed, !isNullish(parsed)
+	case *Enum:
+		parsed := t.ParseLiteral(v)
+		return parsed, !isNullish(parsed)
+	}
+	return nil, true
 }
 
 // typeASTFromGoType maps a runtime Type to its AST form so we can

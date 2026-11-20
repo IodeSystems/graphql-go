@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/IodeSystems/graphql-go/v2"
+	"github.com/IodeSystems/graphql-go/v3"
 )
 
 func main() {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IodeSystems/graphql-go/v2"
+	"github.com/IodeSystems/graphql-go/v3"
 )
 
 // TestSubscribeProducerExitsWhenConsumerStops reproduces #758: if the

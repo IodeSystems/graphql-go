@@ -3,7 +3,7 @@ package graphql_test
 import (
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2"
+	"github.com/IodeSystems/graphql-go/v3"
 )
 
 // buildNormalizeTestSchema builds a small schema with enough type

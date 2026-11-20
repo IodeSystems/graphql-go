@@ -3,7 +3,7 @@ package benchutil
 import (
 	"fmt"
 
-	"github.com/IodeSystems/graphql-go/v2"
+	"github.com/IodeSystems/graphql-go/v3"
 )
 
 type color struct {

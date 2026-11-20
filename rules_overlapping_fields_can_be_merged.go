@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/IodeSystems/graphql-go/v2/language/ast"
-	"github.com/IodeSystems/graphql-go/v2/language/kinds"
-	"github.com/IodeSystems/graphql-go/v2/language/printer"
-	"github.com/IodeSystems/graphql-go/v2/language/visitor"
+	"github.com/IodeSystems/graphql-go/v3/language/ast"
+	"github.com/IodeSystems/graphql-go/v3/language/kinds"
+	"github.com/IodeSystems/graphql-go/v3/language/printer"
+	"github.com/IodeSystems/graphql-go/v3/language/visitor"
 )
 
 func fieldsConflictMessage(responseName string, reason conflictReason) string {

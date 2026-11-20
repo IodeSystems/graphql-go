@@ -3,7 +3,7 @@ package graphql
 import (
 	"fmt"
 
-	"github.com/IodeSystems/graphql-go/v2/gqlerrors"
+	"github.com/IodeSystems/graphql-go/v3/gqlerrors"
 )
 
 // type Schema interface{}

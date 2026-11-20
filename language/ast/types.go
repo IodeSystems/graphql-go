@@ -1,7 +1,7 @@
 package ast
 
 import (
-	"github.com/IodeSystems/graphql-go/v2/language/kinds"
+	"github.com/IodeSystems/graphql-go/v3/language/kinds"
 )
 
 type Type interface {

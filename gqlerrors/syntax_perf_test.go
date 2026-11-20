@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IodeSystems/graphql-go/v2/language/parser"
+	"github.com/IodeSystems/graphql-go/v3/language/parser"
 )
 
 // Syntax-error formatting must stay linear in the error's column.

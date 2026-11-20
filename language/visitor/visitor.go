@@ -2,8 +2,8 @@ package visitor
 
 import (
 	"fmt"
-	"github.com/IodeSystems/graphql-go/v2/language/ast"
-	"github.com/IodeSystems/graphql-go/v2/language/typeInfo"
+	"github.com/IodeSystems/graphql-go/v3/language/ast"
+	"github.com/IodeSystems/graphql-go/v3/language/typeInfo"
 	"reflect"
 )
 

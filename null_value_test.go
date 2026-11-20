@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2"
-	"github.com/IodeSystems/graphql-go/v2/gqlerrors"
-	"github.com/IodeSystems/graphql-go/v2/language/parser"
-	"github.com/IodeSystems/graphql-go/v2/language/source"
+	"github.com/IodeSystems/graphql-go/v3"
+	"github.com/IodeSystems/graphql-go/v3/gqlerrors"
+	"github.com/IodeSystems/graphql-go/v3/language/parser"
+	"github.com/IodeSystems/graphql-go/v3/language/source"
 )
 
 // argsJSON echoes ResolveParams.Args as JSON, so a key present with a

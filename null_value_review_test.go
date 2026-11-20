@@ -3,7 +3,7 @@ package graphql_test
 import (
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2"
+	"github.com/IodeSystems/graphql-go/v3"
 )
 
 // Variable defaults are part of the plan-cache key: two operations that

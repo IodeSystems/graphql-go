@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2/gqlerrors"
-	"github.com/IodeSystems/graphql-go/v2/language/ast"
-	"github.com/IodeSystems/graphql-go/v2/language/location"
-	"github.com/IodeSystems/graphql-go/v2/language/printer"
-	"github.com/IodeSystems/graphql-go/v2/language/source"
+	"github.com/IodeSystems/graphql-go/v3/gqlerrors"
+	"github.com/IodeSystems/graphql-go/v3/language/ast"
+	"github.com/IodeSystems/graphql-go/v3/language/location"
+	"github.com/IodeSystems/graphql-go/v3/language/printer"
+	"github.com/IodeSystems/graphql-go/v3/language/source"
 )
 
 func TestParser_BadToken(t *testing.T) {

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2"
-	"github.com/IodeSystems/graphql-go/v2/benchutil"
+	"github.com/IodeSystems/graphql-go/v3"
+	"github.com/IodeSystems/graphql-go/v3/benchutil"
 )
 
 type B struct {

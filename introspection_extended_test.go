@@ -3,8 +3,8 @@ package graphql_test
 import (
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2"
-	"github.com/IodeSystems/graphql-go/v2/testutil"
+	"github.com/IodeSystems/graphql-go/v3"
+	"github.com/IodeSystems/graphql-go/v3/testutil"
 )
 
 func TestIntrospection_SchemaWithMutationAndSubscription(t *testing.T) {

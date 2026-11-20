@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/IodeSystems/graphql-go/v2/gqlerrors"
-	"github.com/IodeSystems/graphql-go/v2/language/ast"
+	"github.com/IodeSystems/graphql-go/v3/gqlerrors"
+	"github.com/IodeSystems/graphql-go/v3/language/ast"
 )
 
 // Plan is a precomputed execution shape for a (schema, document,

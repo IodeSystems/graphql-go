@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2"
+	"github.com/IodeSystems/graphql-go/v3"
 )
 
 // Input coercion of the built-in scalars, per the spec (Type System ›

@@ -5,9 +5,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2/language/ast"
-	"github.com/IodeSystems/graphql-go/v2/language/printer"
-	"github.com/IodeSystems/graphql-go/v2/testutil"
+	"github.com/IodeSystems/graphql-go/v3/language/ast"
+	"github.com/IodeSystems/graphql-go/v3/language/printer"
+	"github.com/IodeSystems/graphql-go/v3/testutil"
 )
 
 func TestSchemaPrinter_PrintsMinimalAST(t *testing.T) {

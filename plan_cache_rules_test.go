@@ -3,11 +3,11 @@ package graphql_test
 import (
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2"
-	"github.com/IodeSystems/graphql-go/v2/gqlerrors"
-	"github.com/IodeSystems/graphql-go/v2/language/ast"
-	"github.com/IodeSystems/graphql-go/v2/language/kinds"
-	"github.com/IodeSystems/graphql-go/v2/language/visitor"
+	"github.com/IodeSystems/graphql-go/v3"
+	"github.com/IodeSystems/graphql-go/v3/gqlerrors"
+	"github.com/IodeSystems/graphql-go/v3/language/ast"
+	"github.com/IodeSystems/graphql-go/v3/language/kinds"
+	"github.com/IodeSystems/graphql-go/v3/language/visitor"
 )
 
 func rulesTestSchema(t *testing.T) *graphql.Schema {

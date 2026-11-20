@@ -3,9 +3,9 @@ package parser
 import (
 	"testing"
 
-	"github.com/IodeSystems/graphql-go/v2/language/ast"
-	"github.com/IodeSystems/graphql-go/v2/language/kinds"
-	"github.com/IodeSystems/graphql-go/v2/language/printer"
+	"github.com/IodeSystems/graphql-go/v3/language/ast"
+	"github.com/IodeSystems/graphql-go/v3/language/kinds"
+	"github.com/IodeSystems/graphql-go/v3/language/printer"
 )
 
 // `null` parses as a NullValue in every value position and prints back

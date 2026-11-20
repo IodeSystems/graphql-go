@@ -439,12 +439,33 @@ func collectFields(p collectFieldsParams) (fields map[string][]*ast.Field) {
 	return fields
 }
 
+// directiveIf resolves the "if" argument of a @skip / @include
+// directive against the request variables. A null variable for the
+// non-null argument (validation allows it when the variable has a
+// default) panics with an error located at the argument value and
+// carrying the current response path: at the root selection set that
+// is a request error (data null), below it the enclosing field's
+// error, as graphql-js raises it from collectFields.
+func directiveIf(def *Directive, d *ast.Directive, eCtx *executionContext) (value, ok bool) {
+	vals := map[string]interface{}{}
+	if err := populateArgumentValues(vals, def.Args, d.Arguments, eCtx.VariableValues); err != nil {
+		var nodes []ast.Node
+		for _, a := range d.Arguments {
+			if a != nil && a.Name != nil && a.Name.Value == "if" && a.Value != nil {
+				nodes = append(nodes, a.Value)
+			}
+		}
+		panic(gqlerrors.NewErrorWithPath(err.Error(), nodes, err.Error(), nil, []int{}, eCtx.errorPathArray(), err))
+	}
+	value, ok = vals["if"].(bool)
+	return value, ok
+}
+
 // Determines if a field should be included based on the @include and @skip
 // directives, where @skip has higher precedence than @include.
 func shouldIncludeNode(eCtx *executionContext, directives []*ast.Directive) bool {
 	var (
 		skipAST, includeAST *ast.Directive
-		argValues           map[string]interface{}
 	)
 	for _, directive := range directives {
 		if directive == nil || directive.Name == nil {
@@ -459,14 +480,12 @@ func shouldIncludeNode(eCtx *executionContext, directives []*ast.Directive) bool
 	}
 	// precedence: skipAST > includeAST
 	if skipAST != nil {
-		argValues = getArgumentValues(SkipDirective.Args, skipAST.Arguments, eCtx.VariableValues)
-		if skipIf, ok := argValues["if"].(bool); ok && skipIf {
+		if skipIf, ok := directiveIf(SkipDirective, skipAST, eCtx); ok && skipIf {
 			return false // excluded selectionSet's fields
 		}
 	}
 	if includeAST != nil {
-		argValues = getArgumentValues(IncludeDirective.Args, includeAST.Arguments, eCtx.VariableValues)
-		if includeIf, ok := argValues["if"].(bool); ok && !includeIf {
+		if includeIf, ok := directiveIf(IncludeDirective, includeAST, eCtx); ok && !includeIf {
 			return false // excluded selectionSet's fields
 		}
 	}

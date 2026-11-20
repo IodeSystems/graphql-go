@@ -76,7 +76,7 @@ func writePlannedSelection(eCtx *executionContext, sp *selectionPlan, source int
 
 	// Phase 1: resolve everything. No bytes written, no thunk awaited.
 	for _, fp := range sp.fields {
-		if fp.skipPredicate != nil && !fp.skipPredicate(eCtx.VariableValues) {
+		if fp.skipPredicate != nil && !fp.skipPredicate(eCtx) {
 			continue
 		}
 		if fp.fieldDef == nil {

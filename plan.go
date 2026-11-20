@@ -83,7 +83,7 @@ type fieldPlan struct {
 	// skipPredicate evaluates the field's combined @skip / @include
 	// directives against request variables. nil ⇒ always include
 	// (constant-true at plan time, the common case).
-	skipPredicate func(map[string]interface{}) bool
+	skipPredicate func(*executionContext) bool
 
 	// sub is set when returnType (after unwrapping NonNull and List)
 	// resolves to a single concrete *Object; abstractAlternatives is
@@ -337,7 +337,7 @@ func (p *Plan) planMergedSelectionsForType(parentType *Object, fieldASTs []*ast.
 // keyed maps responseKey → index in sp.fields so repeat selections
 // of the same response key merge their fieldASTs (matches
 // collectFields's `fields[name] = append(fields[name], selection)`).
-func (p *Plan) collectInto(parentType *Object, selectionSet *ast.SelectionSet, visitedFragmentNames map[string]bool, sp *selectionPlan, keyed map[string]int, parentPred func(map[string]interface{}) bool) {
+func (p *Plan) collectInto(parentType *Object, selectionSet *ast.SelectionSet, visitedFragmentNames map[string]bool, sp *selectionPlan, keyed map[string]int, parentPred func(*executionContext) bool) {
 	for _, iSelection := range selectionSet.Selections {
 		switch sel := iSelection.(type) {
 		case *ast.Field:
@@ -430,18 +430,18 @@ func (p *Plan) collectInto(parentType *Object, selectionSet *ast.SelectionSet, v
 // are true. nil is treated as the constant-true predicate, so the
 // common "no enclosing gate" / "no field-level directive" cases avoid
 // allocating a closure.
-func andPredicates(a, b func(map[string]interface{}) bool) func(map[string]interface{}) bool {
+func andPredicates(a, b func(*executionContext) bool) func(*executionContext) bool {
 	if a == nil {
 		return b
 	}
 	if b == nil {
 		return a
 	}
-	return func(vars map[string]interface{}) bool {
-		if !a(vars) {
+	return func(eCtx *executionContext) bool {
+		if !a(eCtx) {
 			return false
 		}
-		return b(vars)
+		return b(eCtx)
 	}
 }
 
@@ -616,7 +616,7 @@ func valueHasVariables(v ast.Value) bool {
 // time when their `if` argument is a literal; returns a
 // skipPredicate (nil if always-include) and an alwaysSkip flag (true
 // if literal evaluation produced a definitive skip).
-func planDirectives(directives []*ast.Directive) (pred func(map[string]interface{}) bool, alwaysSkip bool) {
+func planDirectives(directives []*ast.Directive) (pred func(*executionContext) bool, alwaysSkip bool) {
 	var skipDir, includeDir *ast.Directive
 	for _, d := range directives {
 		if d == nil || d.Name == nil {
@@ -658,16 +658,17 @@ func planDirectives(directives []*ast.Directive) (pred func(map[string]interface
 	if skipDyn == nil && includeDyn == nil {
 		return nil, false
 	}
-	return func(vars map[string]interface{}) bool {
+	// Evaluated per request, never cached: a null variable for the
+	// non-null "if" argument panics with a located error (see
+	// directiveIf).
+	return func(eCtx *executionContext) bool {
 		if skipDyn != nil {
-			vals := getArgumentValues(SkipDirective.Args, skipDyn.Arguments, vars)
-			if v, ok := vals["if"].(bool); ok && v {
+			if v, ok := directiveIf(SkipDirective, skipDyn, eCtx); ok && v {
 				return false // excluded
 			}
 		}
 		if includeDyn != nil {
-			vals := getArgumentValues(IncludeDirective.Args, includeDyn.Arguments, vars)
-			if v, ok := vals["if"].(bool); ok && !v {
+			if v, ok := directiveIf(IncludeDirective, includeDyn, eCtx); ok && !v {
 				return false // excluded
 			}
 		}
@@ -814,7 +815,7 @@ func executePlannedSelection(eCtx *executionContext, sp *selectionPlan, source i
 	}
 	finalResults := make(map[string]interface{}, len(sp.fields))
 	for _, fp := range sp.fields {
-		if fp.skipPredicate != nil && !fp.skipPredicate(eCtx.VariableValues) {
+		if fp.skipPredicate != nil && !fp.skipPredicate(eCtx) {
 			continue
 		}
 		if fp.fieldDef == nil {

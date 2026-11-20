@@ -64,8 +64,8 @@ func getArgumentValues(
 	argDefs []*Argument, argASTs []*ast.Argument,
 	variableValues map[string]interface{}) map[string]interface{} {
 	results := map[string]interface{}{}
-	// Directive arguments only: a null variable for a non-null
-	// directive argument is left out here.
+	// Callers pass no variables (plan-time literals), so the null
+	// variable error cannot occur; directiveIf handles the runtime case.
 	_ = populateArgumentValues(results, argDefs, argASTs, variableValues)
 	return results
 }

@@ -20,7 +20,14 @@ import (
 func getVariableValues(
 	schema Schema,
 	definitionASTs []*ast.VariableDefinition,
-	inputs map[string]interface{}) (map[string]interface{}, error) {
+	inputs map[string]interface{}) (_ map[string]interface{}, err error) {
+	// Custom scalar ParseValue may panic; report it as an error so
+	// callers outside a recovering goroutine (ExecutePlanAppend) survive.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v", r)
+		}
+	}()
 	// Fast path: no variable definitions on the operation. Skip the
 	// map alloc; downstream readers (populateArgumentValues, skip
 	// predicates, ResolveInfo.VariableValues consumers) all tolerate

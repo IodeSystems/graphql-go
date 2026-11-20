@@ -1,6 +1,8 @@
 package graphql
 
 import (
+	"fmt"
+
 	"github.com/IodeSystems/graphql-go/v2/gqlerrors"
 	"github.com/IodeSystems/graphql-go/v2/language/ast"
 	"github.com/IodeSystems/graphql-go/v2/language/kinds"
@@ -27,6 +29,17 @@ type ValidationResult struct {
  */
 
 func ValidateDocument(schema *Schema, astDoc *ast.Document, rules []ValidationRuleFn) (vr ValidationResult) {
+	// A custom scalar's ParseLiteral may panic while a rule checks a
+	// literal; report it as a validation error instead of crashing.
+	defer func() {
+		if r := recover(); r != nil {
+			e, ok := r.(error)
+			if !ok {
+				e = fmt.Errorf("%v", r)
+			}
+			vr = ValidationResult{Errors: []gqlerrors.FormattedError{gqlerrors.FormatError(e)}}
+		}
+	}()
 	if len(rules) == 0 {
 		rules = SpecifiedRules
 	}

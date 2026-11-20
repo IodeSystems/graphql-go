@@ -48,7 +48,13 @@ import (
 //
 // Synth variable naming uses the prefix `__pcv` (plan-cache-var) to
 // minimize collision with hand-authored variable names.
-func normalizeDocument(schema *Schema, doc *ast.Document, operationName string) (*ast.Document, map[string]interface{}, string, error) {
+func normalizeDocument(schema *Schema, doc *ast.Document, operationName string) (_ *ast.Document, _ map[string]interface{}, _ string, err error) {
+	// Literal coercion calls custom scalar ParseLiteral, which may panic.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v", r)
+		}
+	}()
 	if schema == nil || doc == nil {
 		return doc, nil, "", nil
 	}

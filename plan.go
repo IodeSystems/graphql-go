@@ -161,7 +161,14 @@ func (p *Plan) IsMutation() bool {
 // "no such field on type X") that the existing executor surfaces as
 // dispatch-time errors continue to surface there — PlanQuery only
 // fails on document-level errors.
-func PlanQuery(schema *Schema, doc *ast.Document, operationName string) (*Plan, error) {
+func PlanQuery(schema *Schema, doc *ast.Document, operationName string) (_ *Plan, err error) {
+	// Static argument literals are coerced here via custom scalar
+	// ParseLiteral, which may panic.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v", r)
+		}
+	}()
 	if schema == nil {
 		return nil, errors.New("graphql: PlanQuery: schema is nil")
 	}

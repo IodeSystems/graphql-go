@@ -120,12 +120,13 @@ func normalizeDocument(schema *Schema, doc *ast.Document, operationName string) 
 // vanishingly improbable, and the schema-pointer guard inside the
 // cache catches any cross-schema accident.
 //
-// The fingerprint captures: operation type, operation name, variable
-// definitions, and the selection tree (field names, arg names, sub-
-// selections, fragment spreads). It deliberately ignores literal
-// values that survived normalization — those are encoded by their
-// AST kind only — so two normalize-equivalent queries hash the
-// same.
+// The fingerprint captures everything the plan depends on: operation
+// type, operation name, variable definitions (with defaults),
+// directives (with arguments), and the selection tree (aliases, field
+// names, arguments, sub-selections, fragment spreads and the bodies
+// they reach). Extracted literals appear as their synth variable
+// names, so two queries that differ only in those literals hash the
+// same; literals that stayed in place are hashed by kind and content.
 func fingerprintDocument(doc *ast.Document, op *ast.OperationDefinition, operationName string) string {
 	h := fnv.New64a()
 	w := fingerprintWriter{h: h, fragments: collectFragmentDefs(doc)}
@@ -135,6 +136,7 @@ func fingerprintDocument(doc *ast.Document, op *ast.OperationDefinition, operati
 	w.writeString(operationName)
 	w.writeByte(0)
 	w.writeVariableDefs(op.VariableDefinitions)
+	w.writeDirectives(op.Directives)
 	w.writeSelectionSet(op.SelectionSet)
 	return strconv.FormatUint(h.Sum64(), 16)
 }
@@ -208,19 +210,8 @@ func (w *fingerprintWriter) writeSelectionSet(sel *ast.SelectionSet) {
 			if s.Name != nil {
 				w.writeString(s.Name.Value)
 			}
-			if len(s.Arguments) > 0 {
-				w.writeByte('(')
-				for _, a := range s.Arguments {
-					if a == nil || a.Name == nil {
-						continue
-					}
-					w.writeString(a.Name.Value)
-					w.writeByte('=')
-					w.writeValue(a.Value)
-					w.writeByte(',')
-				}
-				w.writeByte(')')
-			}
+			w.writeArguments(s.Arguments)
+			w.writeDirectives(s.Directives)
 			w.writeSelectionSet(s.SelectionSet)
 			w.writeByte(';')
 		case *ast.InlineFragment:
@@ -228,18 +219,51 @@ func (w *fingerprintWriter) writeSelectionSet(sel *ast.SelectionSet) {
 			if s.TypeCondition != nil && s.TypeCondition.Name != nil {
 				w.writeString(s.TypeCondition.Name.Value)
 			}
+			w.writeDirectives(s.Directives)
 			w.writeSelectionSet(s.SelectionSet)
 			w.writeByte(';')
 		case *ast.FragmentSpread:
 			w.writeString("...")
 			if s.Name != nil {
 				w.writeString(s.Name.Value)
+				w.writeDirectives(s.Directives)
 				w.writeByte(';')
 				w.writeFragmentBody(s.Name.Value)
 			}
 		}
 	}
 	w.writeByte('}')
+}
+
+func (w *fingerprintWriter) writeArguments(args []*ast.Argument) {
+	if len(args) == 0 {
+		return
+	}
+	w.writeByte('(')
+	for _, a := range args {
+		if a == nil || a.Name == nil {
+			continue
+		}
+		w.writeString(a.Name.Value)
+		w.writeByte('=')
+		w.writeValue(a.Value)
+		w.writeByte(',')
+	}
+	w.writeByte(')')
+}
+
+// writeDirectives hashes directives with their arguments. The planner
+// evaluates literal @skip/@include at plan time, so `@skip(if: true)`
+// and `@skip(if: false)` must not share a plan.
+func (w *fingerprintWriter) writeDirectives(dirs []*ast.Directive) {
+	for _, d := range dirs {
+		if d == nil || d.Name == nil {
+			continue
+		}
+		w.writeByte('@')
+		w.writeString(d.Name.Value)
+		w.writeArguments(d.Arguments)
+	}
 }
 
 func (w *fingerprintWriter) writeFragmentBody(name string) {
@@ -258,6 +282,7 @@ func (w *fingerprintWriter) writeFragmentBody(name string) {
 	if frag.TypeCondition != nil && frag.TypeCondition.Name != nil {
 		w.writeString(frag.TypeCondition.Name.Value)
 	}
+	w.writeDirectives(frag.Directives)
 	w.writeSelectionSet(frag.SelectionSet)
 }
 

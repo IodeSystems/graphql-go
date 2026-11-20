@@ -158,3 +158,16 @@ Not worth taking:
   The test-name typo fix in `quoted_or_list_internal_test.go` is taken.
 - `#756` (parser depth cap), **already here** as `c3e2c2c`, configurable
   where the PR hardcodes 500.
+
+### Opened since, triaged 2026-11-20
+
+- `#762` (concurrent-map crash in `Schema.IsPossibleType`), **taken** as
+  `ce80c2a`, rewritten rather than cherry-picked. The method filled a
+  shared `possibleTypeMap` on read, so concurrent requests that resolve an
+  abstract type wrote one map at once. The map is gone; the check scans
+  `PossibleTypes`. The concurrency regression test and the benchmark are
+  taken.
+- `#761` (subscription producer leaks when the consumer stops reading),
+  **already here** via the `#760` fix. Its regression test is taken as
+  `4c01a61` and passes without code changes.
+- `#763`, `#764` — closed "sync fork" PRs, nothing to take.

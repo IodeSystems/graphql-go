@@ -1099,6 +1099,12 @@ func (gt *Enum) defineEnumValues(valueMap EnumValueConfigMap) ([]*EnumValueDefin
 		if err = assertValidName(valueName); err != nil {
 			return values, err
 		}
+		if err = invariantf(
+			valueName != "true" && valueName != "false" && valueName != "null",
+			`Enum type %v cannot include value: %v.`, gt.PrivateName, valueName,
+		); err != nil {
+			return values, err
+		}
 		value := &EnumValueDefinition{
 			Name:              valueName,
 			Value:             valueConfig.Value,

@@ -817,3 +817,13 @@ func toError(err error) *gqlerrors.Error {
 		return nil
 	}
 }
+
+func TestParser_RejectsReservedEnumValueNames(t *testing.T) {
+	for _, name := range []string{"true", "false", "null"} {
+		_, err := Parse(ParseParams{Source: "enum E { OK " + name + " }"})
+		want := `Name "` + name + `" is reserved and cannot be used for an enum value.`
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: want %q, got %v", name, want, err)
+		}
+	}
+}

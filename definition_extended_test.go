@@ -1247,3 +1247,16 @@ func TestScalarDescription(t *testing.T) {
 		})
 	}
 }
+
+func TestNewEnum_ReservedValueNames(t *testing.T) {
+	for _, name := range []string{"true", "false", "null"} {
+		e := graphql.NewEnum(graphql.EnumConfig{
+			Name:   "E",
+			Values: graphql.EnumValueConfigMap{name: &graphql.EnumValueConfig{}, "OK": &graphql.EnumValueConfig{}},
+		})
+		want := "Enum type E cannot include value: " + name + "."
+		if e.Error() == nil || e.Error().Error() != want {
+			t.Errorf("%s: want %q, got %v", name, want, e.Error())
+		}
+	}
+}

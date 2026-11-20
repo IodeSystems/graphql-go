@@ -1464,13 +1464,25 @@ func parseEnumTypeDefinition(parser *Parser) (ast.Node, error) {
  *
  * EnumValue : Name
  */
+// EnumValue : Name but not `true`, `false` or `null`
+func parseEnumValueName(parser *Parser) (*ast.Name, error) {
+	if parser.Token.Kind == lexer.NAME {
+		switch parser.Token.Value {
+		case "true", "false", "null":
+			return nil, gqlerrors.NewSyntaxError(parser.Source, parser.Token.Start,
+				fmt.Sprintf("%v is reserved and cannot be used for an enum value.", lexer.GetTokenDesc(parser.Token)))
+		}
+	}
+	return parseName(parser)
+}
+
 func parseEnumValueDefinition(parser *Parser) (interface{}, error) {
 	start := parser.Token.Start
 	description, err := parseDescription(parser)
 	if err != nil {
 		return nil, err
 	}
-	name, err := parseName(parser)
+	name, err := parseEnumValueName(parser)
 	if err != nil {
 		return nil, err
 	}

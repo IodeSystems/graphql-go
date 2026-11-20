@@ -141,6 +141,14 @@ func defaultValue(def interface{}) (value interface{}, ok bool) {
 	return def, true
 }
 
+// hasNonNullDefault reports whether def supplies a non-null value, so
+// that a non-null position may be omitted. A null default
+// (ExplicitNull) does not.
+func hasNonNullDefault(def interface{}) bool {
+	_, isNull := def.(explicitNull)
+	return !isNull && !isNullish(def)
+}
+
 // isNullLiteral reports whether v is the `null` literal. A nil v is an
 // absent value, not a null one.
 func isNullLiteral(v ast.Value) bool {
@@ -368,7 +376,12 @@ func isValidInputValue(value interface{}, ttype Input) (bool, []string) {
 
 		// Ensure every defined field is valid.
 		for _, fieldName := range fieldNames {
-			_, messages := isValidInputValue(valueMap[fieldName], fields[fieldName].Type)
+			fieldValue, present := valueMap[fieldName]
+			if !present && hasNonNullDefault(fields[fieldName].DefaultValue) {
+				// Omitted with a default: the default applies.
+				continue
+			}
+			_, messages := isValidInputValue(fieldValue, fields[fieldName].Type)
 			if messages != nil {
 				for _, message := range messages {
 					messagesReduce = append(messagesReduce, fmt.Sprintf(`In field "%v": %v`, fieldName, message))

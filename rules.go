@@ -1794,6 +1794,9 @@ func isValidLiteralValue(ttype Input, valueAST ast.Value) (bool, []string) {
 			var fieldASTValue ast.Value
 			if fieldAST := fieldASTMap[fieldName]; fieldAST != nil {
 				fieldASTValue = fieldAST.Value
+			} else if hasNonNullDefault(field.DefaultValue) {
+				// Omitted with a default: the default applies.
+				continue
 			}
 			if isValid, messages := isValidLiteralValue(field.Type, fieldASTValue); !isValid {
 				for _, message := range messages {

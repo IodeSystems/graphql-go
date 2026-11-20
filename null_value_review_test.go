@@ -46,3 +46,21 @@ func TestPlanCache_DirectivesInKey(t *testing.T) {
 		}
 	}
 }
+
+// An omitted non-null input field with a default is optional.
+func TestInputObject_OmittedNonNullFieldWithDefault(t *testing.T) {
+	schema := nullTestSchema(t)
+	cache := graphql.NewPlanCache(graphql.PlanCacheOptions{Normalize: true})
+	want := `{"data":{"h":"{\"in\":{\"x\":5}}"}}`
+	if got := runAllPaths(t, &schema, cache, `{ h(in: {}) }`, nil); got != want {
+		t.Errorf("literal: got %s, want %s", got, want)
+	}
+	vars := map[string]interface{}{"o": map[string]interface{}{}}
+	if got := runAllPaths(t, &schema, cache, `query($o: InDef) { h(in: $o) }`, vars); got != want {
+		t.Errorf("variable: got %s, want %s", got, want)
+	}
+	// Explicit null is still rejected.
+	if res := graphql.Do(graphql.Params{Schema: schema, RequestString: `{ h(in: {x: null}) }`}); len(res.Errors) == 0 {
+		t.Error("{x: null} into Int! accepted")
+	}
+}

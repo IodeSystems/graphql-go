@@ -1126,12 +1126,15 @@ func parseObjectTypeDefinition(parser *Parser) (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	iFields, err := reverse(parser,
-		lexer.BRACE_L, parseFieldDefinition, lexer.BRACE_R,
-		false,
-	)
-	if err != nil {
-		return nil, err
+	var iFields []interface{}
+	if peek(parser, lexer.BRACE_L) {
+		iFields, err = reverse(parser,
+			lexer.BRACE_L, parseFieldDefinition, lexer.BRACE_R,
+			true,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	fields := []*ast.FieldDefinition{}
 	for _, iField := range iFields {
@@ -1313,12 +1316,15 @@ func parseInterfaceTypeDefinition(parser *Parser) (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	iFields, err := reverse(parser,
-		lexer.BRACE_L, parseFieldDefinition, lexer.BRACE_R,
-		false,
-	)
-	if err != nil {
-		return nil, err
+	var iFields []interface{}
+	if peek(parser, lexer.BRACE_L) {
+		iFields, err = reverse(parser,
+			lexer.BRACE_L, parseFieldDefinition, lexer.BRACE_R,
+			true,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	fields := []*ast.FieldDefinition{}
 	for _, iField := range iFields {
@@ -1421,12 +1427,15 @@ func parseEnumTypeDefinition(parser *Parser) (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	iEnumValueDefs, err := reverse(parser,
-		lexer.BRACE_L, parseEnumValueDefinition, lexer.BRACE_R,
-		false,
-	)
-	if err != nil {
-		return nil, err
+	var iEnumValueDefs []interface{}
+	if peek(parser, lexer.BRACE_L) {
+		iEnumValueDefs, err = reverse(parser,
+			lexer.BRACE_L, parseEnumValueDefinition, lexer.BRACE_R,
+			true,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	values := []*ast.EnumValueDefinition{}
 	for _, iEnumValueDef := range iEnumValueDefs {
@@ -1492,12 +1501,15 @@ func parseInputObjectTypeDefinition(parser *Parser) (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	iInputValueDefinitions, err := reverse(parser,
-		lexer.BRACE_L, parseInputValueDef, lexer.BRACE_R,
-		false,
-	)
-	if err != nil {
-		return nil, err
+	var iInputValueDefinitions []interface{}
+	if peek(parser, lexer.BRACE_L) {
+		iInputValueDefinitions, err = reverse(parser,
+			lexer.BRACE_L, parseInputValueDef, lexer.BRACE_R,
+			true,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	fields := []*ast.InputValueDefinition{}
 	for _, iInputValueDefinition := range iInputValueDefinitions {

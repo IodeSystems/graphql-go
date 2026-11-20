@@ -58,9 +58,8 @@ extend type Foo {
   seven(argument: [String]): Type
 }
 
-extend type Foo @onType {}
+extend type Foo @onType
 
-type NoFields {}
 
 directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 

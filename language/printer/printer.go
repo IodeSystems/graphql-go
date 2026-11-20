@@ -575,7 +575,7 @@ var printDocASTReducer = map[string]visitor.VisitFunc{
 				name,
 				wrap("implements ", join(interfaces, " & "), ""),
 				join(directives, " "),
-				block(fields),
+				definitionBlock(fields),
 			}, " ")
 			if desc := getDescription(node); desc != "" {
 				str = fmt.Sprintf("%s\n%s", desc, str)
@@ -594,7 +594,7 @@ var printDocASTReducer = map[string]visitor.VisitFunc{
 				name,
 				wrap("implements ", join(interfaces, " & "), ""),
 				join(directives, " "),
-				block(fields),
+				definitionBlock(fields),
 			}, " ")
 			if desc := getDescription(node); desc != "" {
 				str = fmt.Sprintf("%s\n%s", desc, str)
@@ -712,7 +712,7 @@ var printDocASTReducer = map[string]visitor.VisitFunc{
 				"interface",
 				name,
 				join(directives, " "),
-				block(fields),
+				definitionBlock(fields),
 			}, " ")
 			if desc := getDescription(node); desc != "" {
 				str = fmt.Sprintf("%s\n%s", desc, str)
@@ -729,7 +729,7 @@ var printDocASTReducer = map[string]visitor.VisitFunc{
 				"interface",
 				name,
 				join(directives, " "),
-				block(fields),
+				definitionBlock(fields),
 			}, " ")
 			if desc := getDescription(node); desc != "" {
 				str = fmt.Sprintf("%s\n%s", desc, str)
@@ -790,7 +790,7 @@ var printDocASTReducer = map[string]visitor.VisitFunc{
 				"enum",
 				name,
 				join(directives, " "),
-				block(values),
+				definitionBlock(values),
 			}, " ")
 			if desc := getDescription(node); desc != "" {
 				str = fmt.Sprintf("%s\n%s", desc, str)
@@ -807,7 +807,7 @@ var printDocASTReducer = map[string]visitor.VisitFunc{
 				"enum",
 				name,
 				join(directives, " "),
-				block(values),
+				definitionBlock(values),
 			}, " ")
 			if desc := getDescription(node); desc != "" {
 				str = fmt.Sprintf("%s\n%s", desc, str)
@@ -862,7 +862,7 @@ var printDocASTReducer = map[string]visitor.VisitFunc{
 				"input",
 				name,
 				join(directives, " "),
-				block(fields),
+				definitionBlock(fields),
 			}, " ")
 			if desc := getDescription(node); desc != "" {
 				str = fmt.Sprintf("%s\n%s", desc, str)
@@ -879,7 +879,7 @@ var printDocASTReducer = map[string]visitor.VisitFunc{
 				"input",
 				name,
 				join(directives, " "),
-				block(fields),
+				definitionBlock(fields),
 			}, " ")
 			if desc := getDescription(node); desc != "" {
 				str = fmt.Sprintf("%s\n%s", desc, str)
@@ -961,4 +961,13 @@ func Print(astNode ast.Node) (printed interface{}) {
 		LeaveKindMap: printDocASTReducer,
 	}, nil)
 	return printed
+}
+
+// definitionBlock prints a type-system definition body. The spec forbids empty
+// braces there, so an empty list prints nothing.
+func definitionBlock(maybeArray interface{}) string {
+	if len(toSliceString(maybeArray)) == 0 {
+		return ""
+	}
+	return block(maybeArray)
 }

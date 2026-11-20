@@ -543,10 +543,10 @@ func TestParseInterfaceTypeDefinitionErrorDirective(t *testing.T) {
 }
 
 func TestParseInterfaceTypeDefinitionErrorReverse(t *testing.T) {
-	parser := makeTestParser(t, `interface Named { }`)
+	parser := makeTestParser(t, `interface Named {}`)
 	_, err := parseInterfaceTypeDefinition(parser)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for empty fields definition")
 	}
 }
 
@@ -1523,7 +1523,7 @@ func TestParseDirectiveDefinitionArgError(t *testing.T) {
 }
 
 func TestParseInterfaceTypeDefinitionReverseError(t *testing.T) {
-	parser := makeTestParser(t, `interface Named `)
+	parser := makeTestParser(t, `interface Named {`)
 	_, err := parseInterfaceTypeDefinition(parser)
 	if err == nil {
 		t.Fatal("expected error for interface missing {")

@@ -170,13 +170,13 @@ type Hello {
 }
 
 func TestSchemaParser_SimpleTypeInheritingInterface(t *testing.T) {
-	body := `type Hello implements World { }`
+	body := `type Hello implements World`
 	astDoc := parse(t, body)
 	expected := ast.NewDocument(&ast.Document{
-		Loc: testLoc(0, 31),
+		Loc: testLoc(0, 27),
 		Definitions: []ast.Node{
 			ast.NewObjectDefinition(&ast.ObjectDefinition{
-				Loc: testLoc(0, 31),
+				Loc: testLoc(0, 27),
 				Name: ast.NewName(&ast.Name{
 					Value: "Hello",
 					Loc:   testLoc(5, 10),
@@ -201,13 +201,13 @@ func TestSchemaParser_SimpleTypeInheritingInterface(t *testing.T) {
 }
 
 func TestSchemaParser_SimpleTypeInheritingMultipleInterfaces(t *testing.T) {
-	body := `type Hello implements Wo & rld { }`
+	body := `type Hello implements Wo & rld`
 	astDoc := parse(t, body)
 	expected := ast.NewDocument(&ast.Document{
-		Loc: testLoc(0, 34),
+		Loc: testLoc(0, 30),
 		Definitions: []ast.Node{
 			ast.NewObjectDefinition(&ast.ObjectDefinition{
-				Loc: testLoc(0, 34),
+				Loc: testLoc(0, 30),
 				Name: ast.NewName(&ast.Name{
 					Value: "Hello",
 					Loc:   testLoc(5, 10),
@@ -239,13 +239,13 @@ func TestSchemaParser_SimpleTypeInheritingMultipleInterfaces(t *testing.T) {
 }
 
 func TestSchemaParser_SimpleTypeInheritingMultipleInterfacesWithLeadingAmpersand(t *testing.T) {
-	body := `type Hello implements & Wo & rld { }`
+	body := `type Hello implements & Wo & rld`
 	astDoc := parse(t, body)
 	expected := ast.NewDocument(&ast.Document{
-		Loc: testLoc(0, 36),
+		Loc: testLoc(0, 32),
 		Definitions: []ast.Node{
 			ast.NewObjectDefinition(&ast.ObjectDefinition{
-				Loc: testLoc(0, 36),
+				Loc: testLoc(0, 32),
 				Name: ast.NewName(&ast.Name{
 					Value: "Hello",
 					Loc:   testLoc(5, 10),

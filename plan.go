@@ -883,7 +883,9 @@ func resolvePlannedField(eCtx *executionContext, parentType *Object, source inte
 			args[k] = v
 		}
 		if len(fp.args.dynamicArgDefs) > 0 {
-			populateArgumentValues(args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues)
+			if err := populateArgumentValues(args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues); err != nil {
+				panic(err)
+			}
 		}
 	}
 

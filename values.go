@@ -64,7 +64,9 @@ func getArgumentValues(
 	argDefs []*Argument, argASTs []*ast.Argument,
 	variableValues map[string]interface{}) map[string]interface{} {
 	results := map[string]interface{}{}
-	populateArgumentValues(results, argDefs, argASTs, variableValues)
+	// Directive arguments only: a null variable for a non-null
+	// directive argument is left out here.
+	_ = populateArgumentValues(results, argDefs, argASTs, variableValues)
 	return results
 }
 
@@ -79,7 +81,8 @@ func populateArgumentValues(
 	dst map[string]interface{},
 	argDefs []*Argument, argASTs []*ast.Argument,
 	variableValues map[string]interface{},
-) {
+) error {
+	var firstErr error
 	for _, argDef := range argDefs {
 		var value ast.Value
 		for _, argAST := range argASTs {
@@ -96,13 +99,16 @@ func populateArgumentValues(
 			// A provided variable passes its value through, null
 			// included. Null into a non-null argument (validation lets
 			// it through when the variable or the argument has a
-			// default) falls back to the argument default, or is left
-			// out, as before.
+			// default) is a field error, as in graphql-js.
 			if val, present := variableValues[v.Name.Value]; present {
-				if _, nonNull := argDef.Type.(*NonNull); val != nil || !nonNull {
-					dst[argDef.PrivateName] = val
+				if _, nonNull := argDef.Type.(*NonNull); val == nil && nonNull {
+					if firstErr == nil {
+						firstErr = fmt.Errorf("Argument %q of non-null type %q must not be null.", argDef.PrivateName, argDef.Type.String())
+					}
 					continue
 				}
+				dst[argDef.PrivateName] = val
+				continue
 			}
 			if def, ok := defaultValue(argDef.DefaultValue); ok {
 				dst[argDef.PrivateName] = def
@@ -118,6 +124,7 @@ func populateArgumentValues(
 		}
 		dst[argDef.PrivateName] = tmp
 	}
+	return firstErr
 }
 
 // ExplicitNull, set as an Argument's or InputObjectField's

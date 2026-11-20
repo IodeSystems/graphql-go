@@ -140,7 +140,10 @@ func resolveFieldForAppend(eCtx *executionContext, parentType *Object, source in
 			pf.args[k] = v
 		}
 		if len(fp.args.dynamicArgDefs) > 0 {
-			populateArgumentValues(pf.args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues)
+			if err := populateArgumentValues(pf.args, fp.args.dynamicArgDefs, fp.args.dynamicArgASTs, eCtx.VariableValues); err != nil {
+				pf.err = err
+				return pf
+			}
 		}
 	}
 
@@ -225,6 +228,9 @@ func writeResolvedField(eCtx *executionContext, parentType *Object, source inter
 		}
 	}
 
+	if pf.err != nil && fp.fieldDef.ResolveAppend != nil {
+		panic(pf.err)
+	}
 	if fp.fieldDef.ResolveAppend != nil {
 		out = append(dst, fp.responseKeyJSON...)
 		appended, err := fp.fieldDef.ResolveAppend(ResolveParams{

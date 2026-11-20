@@ -189,7 +189,13 @@ func ExecuteSubscription(p ExecuteParams) chan *Result {
 		// level, so there's no list-element nesting to track here.
 		exeContext.pathBuf = append(exeContext.pathBuf, pathEntry{key: responseName})
 
-		args := getArgumentValues(fieldDef.Args, fieldNode.Arguments, exeContext.VariableValues)
+		args := map[string]interface{}{}
+		if err := populateArgumentValues(args, fieldDef.Args, fieldNode.Arguments, exeContext.VariableValues); err != nil {
+			send(&Result{
+				Errors: gqlerrors.FormatErrors(NewLocatedErrorWithPath(err, FieldASTsToNodeASTs(fieldNodes), exeContext.errorPathArray())),
+			})
+			return
+		}
 		info := ResolveInfo{
 			FieldName:      fieldName,
 			FieldASTs:      fieldNodes,

@@ -320,3 +320,20 @@ func TestNullVariable_ProvidedVersusAbsent(t *testing.T) {
 		}
 	}
 }
+
+// A null variable for a non-null argument (allowed by validation when
+// the variable has a default) is a field error, not the default.
+func TestNullLiteral_NullVariableForNonNullArgument(t *testing.T) {
+	schema := nullTestSchema(t)
+	cache := graphql.NewPlanCache(graphql.PlanCacheOptions{Normalize: true})
+	got := runAllPaths(t, &schema, cache, `query($v: Int = 2) { req(a: $v) }`, map[string]interface{}{"v": nil})
+	want := `{"data":{"req":null},"errors":[{"message":"Argument \"a\" of non-null type \"Int!\" must not be null.","locations":[{"line":1,"column":22}],"path":["req"]}]}`
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+	// Omitted: the variable default applies.
+	got = runAllPaths(t, &schema, cache, `query($v: Int = 2) { req(a: $v) }`, nil)
+	if got != `{"data":{"req":"{\"a\":2}"}}` {
+		t.Errorf("got %s", got)
+	}
+}

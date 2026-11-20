@@ -717,7 +717,7 @@ func TestVariables_NullableScalars_AllowsNullableInputsToBeSetToNullInAVariable(
 	}
 	expected := &graphql.Result{
 		Data: map[string]interface{}{
-			"fieldWithNullableStringInput": nil,
+			"fieldWithNullableStringInput": "null",
 		},
 	}
 
@@ -978,7 +978,7 @@ func TestVariables_ListsAndNullability_AllowsListsToBeNull(t *testing.T) {
 
 	expected := &graphql.Result{
 		Data: map[string]interface{}{
-			"list": nil,
+			"list": "null",
 		},
 	}
 	ast := testutil.TestParse(t, doc)
@@ -1161,7 +1161,7 @@ func TestVariables_ListsAndNullability_AllowsListsOfNonNullsToBeNull(t *testing.
 	}
 	expected := &graphql.Result{
 		Data: map[string]interface{}{
-			"listNN": nil,
+			"listNN": "null",
 		},
 	}
 	ast := testutil.TestParse(t, doc)

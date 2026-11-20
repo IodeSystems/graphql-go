@@ -264,3 +264,40 @@ func TestNullLiteral_IntrospectionDefaultValue(t *testing.T) {
 		}
 	}
 }
+
+// A variable provided as null reaches the resolver as null; a variable
+// not provided leaves the argument absent (spec CoerceVariableValues,
+// CoerceArgumentValues).
+func TestNullVariable_ProvidedVersusAbsent(t *testing.T) {
+	schema := nullTestSchema(t)
+	cache := graphql.NewPlanCache(graphql.PlanCacheOptions{Normalize: true})
+	null := map[string]interface{}{"v": nil}
+	cases := []struct {
+		query string
+		vars  map[string]interface{}
+		want  string
+	}{
+		{`query($v: Int) { f(a: $v) }`, nil, `{"data":{"f":"{\"b\":5}"}}`},
+		{`query($v: Int) { f(a: $v) }`, null, `{"data":{"f":"{\"a\":null,\"b\":5}"}}`},
+		// Not provided: the argument default applies. Null: it does not.
+		{`query($v: Int) { f(b: $v) }`, nil, `{"data":{"f":"{\"b\":5}"}}`},
+		{`query($v: Int) { f(b: $v) }`, null, `{"data":{"f":"{\"b\":null}"}}`},
+		// Variable defaults apply only when the variable is not provided.
+		{`query($v: Int = null) { f(a: $v) }`, nil, `{"data":{"f":"{\"a\":null,\"b\":5}"}}`},
+		{`query($v: Int = 3) { f(a: $v) }`, nil, `{"data":{"f":"{\"a\":3,\"b\":5}"}}`},
+		{`query($v: Int = 3) { f(a: $v) }`, null, `{"data":{"f":"{\"a\":null,\"b\":5}"}}`},
+		// Inside an input object literal.
+		{`query($v: Int) { f(obj: {y: $v}) }`, nil, `{"data":{"f":"{\"b\":5,\"obj\":{\"n\":null,\"y\":7}}"}}`},
+		{`query($v: Int) { f(obj: {y: $v}) }`, null, `{"data":{"f":"{\"b\":5,\"obj\":{\"n\":null,\"y\":null}}"}}`},
+		// Inside an input object variable.
+		{`query($o: In) { f(obj: $o) }`, map[string]interface{}{"o": map[string]interface{}{"y": nil}},
+			`{"data":{"f":"{\"b\":5,\"obj\":{\"n\":null,\"y\":null}}"}}`},
+		{`query($o: In) { f(obj: $o) }`, map[string]interface{}{"o": map[string]interface{}{}},
+			`{"data":{"f":"{\"b\":5,\"obj\":{\"n\":null,\"y\":7}}"}}`},
+	}
+	for _, c := range cases {
+		if got := runAllPaths(t, schema, cache, c.query, c.vars); got != c.want {
+			t.Errorf("%s %v\n  got  %s\n  want %s", c.query, c.vars, got, c.want)
+		}
+	}
+}

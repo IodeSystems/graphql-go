@@ -41,9 +41,14 @@ func getVariableValues(
 			continue
 		}
 		varName := defAST.Variable.Name.Value
-		if varValue, err := getVariableValue(schema, defAST, inputs[varName]); err != nil {
+		input, hasValue := inputs[varName]
+		varValue, present, err := getVariableValue(schema, defAST, input, hasValue)
+		if err != nil {
 			return values, err
-		} else {
+		}
+		// A variable that was not provided and has no default is left
+		// out, so an argument it feeds is absent rather than null.
+		if present {
 			values[varName] = varValue
 		}
 	}
@@ -82,6 +87,23 @@ func populateArgumentValues(
 		}
 		if isNullLiteral(value) {
 			dst[argDef.PrivateName] = nil
+			continue
+		}
+		if v, ok := value.(*ast.Variable); ok && v.Name != nil {
+			// A provided variable passes its value through, null
+			// included. Null into a non-null argument (validation lets
+			// it through when the variable or the argument has a
+			// default) falls back to the argument default, or is left
+			// out, as before.
+			if val, present := variableValues[v.Name.Value]; present {
+				if _, nonNull := argDef.Type.(*NonNull); val != nil || !nonNull {
+					dst[argDef.PrivateName] = val
+					continue
+				}
+			}
+			if def, ok := defaultValue(argDef.DefaultValue); ok {
+				dst[argDef.PrivateName] = def
+			}
 			continue
 		}
 		tmp := valueFromAST(value, argDef.Type, variableValues)
@@ -127,16 +149,19 @@ func isNullLiteral(v ast.Value) bool {
 }
 
 // Given a variable definition, and any value of input, return a value which
-// adheres to the variable definition, or throw an error.
-func getVariableValue(schema Schema, definitionAST *ast.VariableDefinition, input interface{}) (interface{}, error) {
+// adheres to the variable definition, or throw an error. hasValue says
+// whether the request supplied the variable at all; present says
+// whether the variable has a value (possibly nil, for null) after
+// defaults (spec CoerceVariableValues).
+func getVariableValue(schema Schema, definitionAST *ast.VariableDefinition, input interface{}, hasValue bool) (value interface{}, present bool, err error) {
 	ttype, err := typeFromAST(schema, definitionAST.Type)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	variable := definitionAST.Variable
 
 	if ttype == nil || !IsInputType(ttype) {
-		return "", gqlerrors.NewError(
+		return "", false, gqlerrors.NewError(
 			fmt.Sprintf(`Variable "$%v" expected value of type `+
 				`"%v" which cannot be used as an input type.`, variable.Name.Value, printer.Print(definitionAST.Type)),
 			[]ast.Node{definitionAST},
@@ -147,17 +172,18 @@ func getVariableValue(schema Schema, definitionAST *ast.VariableDefinition, inpu
 		)
 	}
 
+	if !hasValue && definitionAST.DefaultValue != nil {
+		return valueFromAST(definitionAST.DefaultValue, ttype, nil), true, nil
+	}
 	isValid, messages := isValidInputValue(input, ttype)
 	if isValid {
-		if isNullish(input) {
-			if definitionAST.DefaultValue != nil {
-				return valueFromAST(definitionAST.DefaultValue, ttype, nil), nil
-			}
+		if !hasValue {
+			return nil, false, nil
 		}
-		return coerceValue(ttype, input), nil
+		return coerceValue(ttype, input), true, nil
 	}
 	if isNullish(input) {
-		return "", gqlerrors.NewError(
+		return "", false, gqlerrors.NewError(
 			fmt.Sprintf(`Variable "$%v" of required type `+
 				`"%v" was not provided.`, variable.Name.Value, printer.Print(definitionAST.Type)),
 			[]ast.Node{definitionAST},
@@ -177,7 +203,7 @@ func getVariableValue(schema Schema, definitionAST *ast.VariableDefinition, inpu
 		msg = "\n" + strings.Join(messages, "\n")
 	}
 
-	return "", gqlerrors.NewError(
+	return "", false, gqlerrors.NewError(
 		fmt.Sprintf(`Variable "$%v" got invalid value `+
 			`%v.%v`, variable.Name.Value, inputStr, msg),
 		[]ast.Node{definitionAST},
@@ -491,6 +517,18 @@ func valueFromAST(valueAST ast.Value, ttype Input, variables map[string]interfac
 			if of, ok = fieldASTs[name]; ok {
 				if isNullLiteral(of.Value) {
 					obj[name] = nil
+					continue
+				}
+				if v, isVar := of.Value.(*ast.Variable); isVar && v.Name != nil {
+					// Provided (null included) passes through; not
+					// provided falls back to the field default.
+					if val, present := variables[v.Name.Value]; present {
+						obj[name] = val
+						continue
+					}
+					if def, hasDefault := defaultValue(field.DefaultValue); hasDefault {
+						obj[name] = def
+					}
 					continue
 				}
 				if value := valueFromAST(of.Value, field.Type, variables); !isNullish(value) {

@@ -96,6 +96,18 @@ func NewSchema(config SchemaConfig) (Schema, error) {
 	// assume that user will never add a nil object to config
 	initialTypes = append(initialTypes, config.Types...)
 
+	// Types referenced only by custom directive arguments (e.g. an enum) still
+	// belong in the type map, as in graphql-js.
+	if len(config.Directives) > 0 {
+		for _, dir := range schema.directives {
+			for _, arg := range dir.Args {
+				if arg != nil && arg.Type != nil {
+					initialTypes = append(initialTypes, arg.Type)
+				}
+			}
+		}
+	}
+
 	for _, ttype := range initialTypes {
 		if ttype.Error() != nil {
 			return schema, ttype.Error()

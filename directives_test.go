@@ -584,3 +584,37 @@ func TestDirectivesWorksWithSkipAndIncludeDirectives_NoIncludeOrSkip(t *testing.
 		t.Fatalf("Unexpected result, Diff: %v", testutil.Diff(expected, result))
 	}
 }
+
+// upstream #539: a type used only as a custom directive argument type must
+// appear in the schema type map and in introspection.
+func TestDirectiveArgTypeInSchemaTypes(t *testing.T) {
+	e := graphql.NewEnum(graphql.EnumConfig{Name: "AuthType", Values: graphql.EnumValueConfigMap{"JWT": &graphql.EnumValueConfig{Value: 1}}})
+	d := graphql.NewDirective(graphql.DirectiveConfig{
+		Name:      "auth",
+		Locations: []string{graphql.DirectiveLocationFieldDefinition},
+		Args:      graphql.FieldConfigArgument{"type": &graphql.ArgumentConfig{Type: graphql.NewNonNull(e)}},
+	})
+	s, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query:      graphql.NewObject(graphql.ObjectConfig{Name: "Query", Fields: graphql.Fields{"f": &graphql.Field{Type: graphql.String}}}),
+		Directives: []*graphql.Directive{d},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Type("AuthType") != e {
+		t.Fatal("AuthType missing from schema type map")
+	}
+	r := graphql.Do(graphql.Params{Schema: s, RequestString: `{__schema{types{name}}}`})
+	if r.HasErrors() {
+		t.Fatal(r.Errors)
+	}
+	found := false
+	for _, ty := range r.Data.(map[string]interface{})["__schema"].(map[string]interface{})["types"].([]interface{}) {
+		if ty.(map[string]interface{})["name"] == "AuthType" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("AuthType missing from __schema.types")
+	}
+}

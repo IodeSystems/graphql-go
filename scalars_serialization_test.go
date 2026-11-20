@@ -22,7 +22,7 @@ type float64SerializationTest struct {
 
 type stringSerializationTest struct {
 	Value    interface{}
-	Expected string
+	Expected interface{}
 }
 
 type dateTimeSerializationTest struct {
@@ -32,7 +32,7 @@ type dateTimeSerializationTest struct {
 
 type boolSerializationTest struct {
 	Value    interface{}
-	Expected bool
+	Expected interface{}
 }
 
 func TestTypeSystem_Scalar_SerializesOutputInt(t *testing.T) {
@@ -40,14 +40,16 @@ func TestTypeSystem_Scalar_SerializesOutputInt(t *testing.T) {
 		{1, 1},
 		{0, 0},
 		{-1, -1},
-		{float32(0.1), 0},
-		{float32(1.1), 1},
-		{float32(-1.1), -1},
+		// Fractional values are errors (nil), not truncated.
+		{float32(0.1), nil},
+		{float32(1.1), nil},
+		{float32(-1.1), nil},
 		{float32(1e5), 100000},
 		{float32(math.MaxFloat32), nil},
-		{float64(0.1), 0},
-		{float64(1.1), 1},
-		{float64(-1.1), -1},
+		{float64(0.1), nil},
+		{float64(1.1), nil},
+		{float64(-1.1), nil},
+		{float64(2), 2},
 		{float64(1e5), 100000},
 		{float64(math.MaxFloat32), nil},
 		{float64(math.MaxFloat64), nil},
@@ -58,9 +60,11 @@ func TestTypeSystem_Scalar_SerializesOutputInt(t *testing.T) {
 		// Too big to represent as an Int in Go, JavaScript or GraphQL
 		{float64(1e100), nil},
 		{float64(-1e100), nil},
-		{"-1.1", -1},
+		{"-1.1", nil},
+		{"-2", -2},
+		{"2.0", 2},
 		{json.Number("42"), 42},
-		{json.Number("-1.1"), -1},
+		{json.Number("-1.1"), nil},
 		{json.Number("1e3"), 1000},
 		{json.Number("9876504321"), nil},
 		{json.Number("one"), nil},
@@ -123,6 +127,9 @@ func TestTypeSystem_Scalar_SerializesOutputFloat(t *testing.T) {
 		{"one", nil},
 		{false, 0.0},
 		{true, 1.0},
+		{math.NaN(), nil},
+		{math.Inf(1), nil},
+		{"NaN", nil},
 	}
 
 	for i, test := range tests {
@@ -148,6 +155,14 @@ func TestTypeSystem_Scalar_SerializesOutputStrings(t *testing.T) {
 		{float64(-1.1), "-1.1"},
 		{true, "true"},
 		{false, "false"},
+		{float64(3e9), "3000000000"},
+		{float64(1e21), "1e+21"},
+		{float64(1e-7), "1e-7"},
+		{uint64(math.MaxUint64), "18446744073709551615"},
+		{json.Number("1.50"), "1.50"},
+		{math.NaN(), nil},
+		{map[string]interface{}{}, nil},
+		{[]byte("x"), nil},
 	}
 
 	for _, test := range tests {
@@ -163,8 +178,12 @@ func TestTypeSystem_Scalar_SerializesOutputBoolean(t *testing.T) {
 	tests := []boolSerializationTest{
 		{"true", true},
 		{"false", false},
-		{"string", true},
-		{"", false},
+		{"string", nil},
+		{"", nil},
+		{int(2), true},
+		{float64(0), false},
+		{math.Inf(1), nil},
+		{[]int{}, nil},
 		{int(1), true},
 		{int(0), false},
 		{true, true},

@@ -205,6 +205,13 @@ type Scalar struct {
 
 	scalarConfig ScalarConfig
 	err          error
+
+	// serializeStrict is set only on the built-in scalars (Int, Float,
+	// String, Boolean, ID). It is result coercion with an error channel:
+	// the executors call it instead of Serialize and turn a non-nil
+	// error into a field error. Custom scalars leave it nil, so their
+	// Serialize returning nil still means null with no error.
+	serializeStrict func(interface{}) (interface{}, error)
 }
 
 // SerializeFn is a function type for serializing a GraphQLScalar type value

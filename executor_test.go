@@ -373,7 +373,7 @@ func TestThreadsSourceCorrectly(t *testing.T) {
 					Type: graphql.String,
 					Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 						resolvedSource = p.Source.(map[string]interface{})
-						return resolvedSource, nil
+						return "ok", nil
 					},
 				},
 			},
@@ -429,7 +429,7 @@ func TestCorrectlyThreadsArguments(t *testing.T) {
 					Type: graphql.String,
 					Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 						resolvedArgs = p.Args
-						return resolvedArgs, nil
+						return "ok", nil
 					},
 				},
 			},

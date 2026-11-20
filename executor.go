@@ -533,7 +533,16 @@ func handleFieldError(r interface{}, fieldNodes []ast.Node, returnType Output, e
 }
 
 // completeLeafValue complete a leaf value (Scalar / Enum) by serializing to a valid value, returning nil if serialization is not possible.
+// A built-in scalar that cannot represent the value panics with the
+// coercion error; the caller's field-error recovery records it.
 func completeLeafValue(returnType Leaf, result interface{}) interface{} {
+	if st, ok := returnType.(*Scalar); ok && st.serializeStrict != nil {
+		serialized, err := st.serializeStrict(result)
+		if err != nil {
+			panic(err)
+		}
+		return serialized
+	}
 	serializedResult := returnType.Serialize(result)
 	if isNullish(serializedResult) {
 		return nil

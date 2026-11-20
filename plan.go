@@ -1320,11 +1320,10 @@ func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, 
 // when the resolver returned the canonical Go type (string for
 // String/ID, int for Int, float64 for Float, bool for Boolean). The
 // generic Serialize+leafEmitter path would otherwise coerce the same
-// value twice (e.g. coerceString runs fmt.Sprintf on a plain string,
-// allocating a new string identical to the input). On a type-assertion
-// miss or a value the canonical path would null-out (Int overflow,
-// NaN/Inf float), control falls through to the generic path so the
-// existing spec-compliant behavior is preserved.
+// value twice. On a type-assertion miss or a value the canonical path
+// cannot represent (Int overflow, NaN/Inf float), control falls
+// through to the generic path, where serializeStrict raises the field
+// error.
 func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPlan, info ResolveInfo, result interface{}, dst []byte, nonNull bool) []byte {
 	switch t := fp.leafType.(type) {
 	case *Scalar:
@@ -1366,7 +1365,18 @@ func writeCompleteLeafValue(eCtx *executionContext, returnType Leaf, fp *fieldPl
 		}
 	}
 
-	serialized := returnType.Serialize(result)
+	var serialized interface{}
+	if st, ok := returnType.(*Scalar); ok && st.serializeStrict != nil {
+		// Built-in scalar: a value it cannot represent is a field error
+		// (recorded by the caller's recoverCompleteValue /
+		// recoverPlannedField), not a silent null.
+		var err error
+		if serialized, err = st.serializeStrict(result); err != nil {
+			panic(err)
+		}
+	} else {
+		serialized = returnType.Serialize(result)
+	}
 	if isNullish(serialized) {
 		if nonNull {
 			err := NewLocatedErrorWithPath(

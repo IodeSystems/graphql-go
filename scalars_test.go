@@ -198,11 +198,11 @@ func TestCoerceInt(t *testing.T) {
 		},
 		{
 			in:   float32(30.1),
-			want: int(30),
+			want: nil, // fractional: Int cannot represent it
 		},
 		{
 			in:   float32Ptr(31.2),
-			want: int(31),
+			want: nil,
 		},
 		{
 			in:   (*float32)(nil),
@@ -214,7 +214,7 @@ func TestCoerceInt(t *testing.T) {
 		},
 		{
 			in:   float64Ptr(33.1),
-			want: int(33),
+			want: nil,
 		},
 		{
 			in:   (*float64)(nil),
@@ -447,7 +447,7 @@ func TestCoerceFloat(t *testing.T) {
 	}
 }
 
-func TestCoerceBool(t *testing.T) {
+func TestParseBoolValue(t *testing.T) {
 	tests := []struct {
 		in   interface{}
 		want interface{}
@@ -743,7 +743,7 @@ func TestCoerceBool(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		if got, want := coerceBool(tt.in), tt.want; got != want {
+		if got, want := parseBoolValue(tt.in), tt.want; got != want {
 			t.Errorf("%d: in=%v, got=%v, want=%v", i, tt.in, got, want)
 		}
 	}

@@ -699,6 +699,9 @@ func init() {
 // | Number        | Int / Float          |
 
 func astFromValue(value interface{}, ttype Type) ast.Value {
+	if _, ok := value.(explicitNull); ok {
+		return ast.NewNullValue(nil)
+	}
 
 	if ttype, ok := ttype.(*NonNull); ok {
 		// Note: we're not checking that the result is non-null.

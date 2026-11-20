@@ -35,6 +35,7 @@ No linter, formatter, build step, or codegen. `go fmt` and `go vet` are the only
 - **`ScalarConfig.AppendJSON`** — optional hook for custom scalars to emit JSON bytes directly.
 - **`PlanCacheOptions.Rules`** — extra validation rules run after `SpecifiedRules` in the same pass; a rejection is cached like any validation error, so a rule costs nothing on a cache hit (depth limits, introspection bans).
 - **`Plan.IsMutation()`** — whether the planned operation is a mutation, so a transport can refuse it on GET before executing.
+- **`ExplicitNull`** — set as `ArgumentConfig.DefaultValue` / `InputObjectFieldConfig.DefaultValue` to declare a `= null` default (nil means no default). Resolvers see the key with a nil value; introspection reports `"null"`. A `null` literal (`f(a: null)`) also puts the key in `Args` with a nil value; an absent argument leaves it out.
 
 ### ExecuteParams flags (append-mode)
 

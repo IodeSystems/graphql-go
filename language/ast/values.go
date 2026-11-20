@@ -17,6 +17,7 @@ var _ Value = (*FloatValue)(nil)
 var _ Value = (*StringValue)(nil)
 var _ Value = (*BooleanValue)(nil)
 var _ Value = (*EnumValue)(nil)
+var _ Value = (*NullValue)(nil)
 var _ Value = (*ListValue)(nil)
 var _ Value = (*ObjectValue)(nil)
 
@@ -185,6 +186,34 @@ func (v *EnumValue) GetLoc() *Location {
 
 func (v *EnumValue) GetValue() interface{} {
 	return v.Value
+}
+
+// NullValue implements Node, Value. It is the `null` literal (spec
+// 2.9.5). GetValue returns nil; an absent value has no node at all, so
+// a nil ast.Value and a *NullValue are different things.
+type NullValue struct {
+	Kind string
+	Loc  *Location
+}
+
+func NewNullValue(v *NullValue) *NullValue {
+	if v == nil {
+		v = &NullValue{}
+	}
+	v.Kind = kinds.NullValue
+	return v
+}
+
+func (v *NullValue) GetKind() string {
+	return v.Kind
+}
+
+func (v *NullValue) GetLoc() *Location {
+	return v.Loc
+}
+
+func (v *NullValue) GetValue() interface{} {
+	return nil
 }
 
 // ListValue implements Node, Value

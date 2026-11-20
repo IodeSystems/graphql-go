@@ -554,12 +554,15 @@ func planArguments(argDefs []*Argument, argASTs []*ast.Argument) argPlan {
 		if argAST != nil {
 			value = argAST.Value
 		}
-		tmp := valueFromAST(value, argDef.Type, nil)
-		if isNullish(tmp) {
-			tmp = argDef.DefaultValue
-		}
-		if isNullish(tmp) {
-			continue
+		var tmp interface{}
+		if !isNullLiteral(value) {
+			tmp = valueFromAST(value, argDef.Type, nil)
+			if isNullish(tmp) {
+				var hasDefault bool
+				if tmp, hasDefault = defaultValue(argDef.DefaultValue); !hasDefault {
+					continue
+				}
+			}
 		}
 		if static == nil {
 			static = map[string]interface{}{}

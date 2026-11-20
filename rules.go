@@ -1646,8 +1646,9 @@ func VariablesAreInputTypesRule(context *ValidationContext) *ValidationRuleInsta
 }
 
 // If a variable definition has a default value, it's effectively non-null.
+// A `null` default does not count: the variable can still be null.
 func effectiveType(varType Type, varDef *ast.VariableDefinition) Type {
-	if varDef.DefaultValue == nil {
+	if varDef.DefaultValue == nil || isNullLiteral(varDef.DefaultValue) {
 		return varType
 	}
 	if _, ok := varType.(*NonNull); ok {
@@ -1725,6 +1726,11 @@ func VariablesInAllowedPositionRule(context *ValidationContext) *ValidationRuleI
 // Note that this only validates literal values, variables are assumed to
 // provide values of the correct type.
 func isValidLiteralValue(ttype Input, valueAST ast.Value) (bool, []string) {
+	// `null` is valid wherever the type is nullable, and found-null
+	// wherever it is not: the same as an absent value.
+	if isNullLiteral(valueAST) {
+		valueAST = nil
+	}
 	if _, ok := ttype.(*NonNull); !ok {
 		if valueAST == nil {
 			return true, nil

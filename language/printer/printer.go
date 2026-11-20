@@ -408,6 +408,13 @@ var printDocASTReducer = map[string]visitor.VisitFunc{
 		}
 		return visitor.ActionNoChange, nil
 	},
+	"NullValue": func(p visitor.VisitFuncParams) (string, interface{}) {
+		switch p.Node.(type) {
+		case *ast.NullValue, map[string]interface{}:
+			return visitor.ActionUpdate, "null"
+		}
+		return visitor.ActionNoChange, nil
+	},
 	"ListValue": func(p visitor.VisitFuncParams) (string, interface{}) {
 		switch node := p.Node.(type) {
 		case *ast.ListValue:

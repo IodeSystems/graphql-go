@@ -80,14 +80,50 @@ func populateArgumentValues(
 				break
 			}
 		}
+		if isNullLiteral(value) {
+			dst[argDef.PrivateName] = nil
+			continue
+		}
 		tmp := valueFromAST(value, argDef.Type, variableValues)
 		if isNullish(tmp) {
-			tmp = argDef.DefaultValue
+			if def, ok := defaultValue(argDef.DefaultValue); ok {
+				dst[argDef.PrivateName] = def
+			}
+			continue
 		}
-		if !isNullish(tmp) {
-			dst[argDef.PrivateName] = tmp
-		}
+		dst[argDef.PrivateName] = tmp
 	}
+}
+
+// ExplicitNull, set as an Argument's or InputObjectField's
+// DefaultValue, declares a default of null (`arg: Int = null`). A nil
+// DefaultValue means no default. When the default applies, the
+// resolver sees the key in ResolveParams.Args with a nil value, the
+// same as for an explicit `null` literal; introspection reports the
+// defaultValue as "null".
+var ExplicitNull interface{} = explicitNull{}
+
+type explicitNull struct{}
+
+func (explicitNull) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+
+// defaultValue maps a configured DefaultValue to the Go value it
+// supplies. ok is false when there is no default.
+func defaultValue(def interface{}) (value interface{}, ok bool) {
+	if _, isNull := def.(explicitNull); isNull {
+		return nil, true
+	}
+	if isNullish(def) {
+		return nil, false
+	}
+	return def, true
+}
+
+// isNullLiteral reports whether v is the `null` literal. A nil v is an
+// absent value, not a null one.
+func isNullLiteral(v ast.Value) bool {
+	_, ok := v.(*ast.NullValue)
+	return ok
 }
 
 // Given a variable definition, and any value of input, return a value which
@@ -180,13 +216,21 @@ func coerceValue(ttype Input, value interface{}) interface{} {
 
 		for name, field := range ttype.Fields() {
 			value, presentInValueMap := valueMap[name]
+			if presentInValueMap && value == nil {
+				// Explicit null: kept, and not replaced by the
+				// field's default.
+				obj[name] = nil
+				continue
+			}
 			fieldValue := coerceValue(field.Type, value)
 			if isNullish(fieldValue) {
-				fieldValue = field.DefaultValue
+				def, hasDefault := defaultValue(field.DefaultValue)
+				if hasDefault || presentInValueMap {
+					obj[name] = def
+				}
+				continue
 			}
-			if !isNullish(fieldValue) || presentInValueMap {
-				obj[name] = fieldValue
-			}
+			obj[name] = fieldValue
 		}
 		return obj
 	case *Scalar:
@@ -394,10 +438,14 @@ func isIterable(src interface{}) bool {
  * | Boolean              | Boolean       |
  * | String / Enum Value  | String        |
  * | Int / Float          | Number        |
+ * | Null                 | nil           |
  *
+ * nil is also returned for an absent (nil) valueAST and for a literal
+ * that does not coerce; callers that must tell `null` from absent
+ * check isNullLiteral first.
  */
 func valueFromAST(valueAST ast.Value, ttype Input, variables map[string]interface{}) interface{} {
-	if valueAST == nil {
+	if valueAST == nil || isNullLiteral(valueAST) {
 		return nil
 	}
 	// precedence: value > type
@@ -440,14 +488,18 @@ func valueFromAST(valueAST ast.Value, ttype Input, variables map[string]interfac
 		}
 		obj := map[string]interface{}{}
 		for name, field := range ttype.Fields() {
-			var value interface{}
 			if of, ok = fieldASTs[name]; ok {
-				value = valueFromAST(of.Value, field.Type, variables)
-			} else {
-				value = field.DefaultValue
+				if isNullLiteral(of.Value) {
+					obj[name] = nil
+					continue
+				}
+				if value := valueFromAST(of.Value, field.Type, variables); !isNullish(value) {
+					obj[name] = value
+				}
+				continue
 			}
-			if !isNullish(value) {
-				obj[name] = value
+			if def, hasDefault := defaultValue(field.DefaultValue); hasDefault {
+				obj[name] = def
 			}
 		}
 		return obj

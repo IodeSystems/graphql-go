@@ -3,6 +3,7 @@ package parser
 import (
 	"testing"
 
+	"github.com/IodeSystems/graphql-go/v2/language/ast"
 	"github.com/IodeSystems/graphql-go/v2/language/source"
 )
 
@@ -1144,12 +1145,15 @@ func TestParse_IntegrationNoLocation(t *testing.T) {
 }
 
 func TestParse_ValueNullInput(t *testing.T) {
-	_, err := ParseValue(ParseParams{
+	v, err := ParseValue(ParseParams{
 		Source:  `null`,
 		Options: ParseOptions{NoLocation: true, NoSource: true},
 	})
-	if err == nil {
-		t.Fatal("expected error for null value")
+	if err != nil {
+		t.Fatalf("null value: %v", err)
+	}
+	if _, ok := v.(*ast.NullValue); !ok {
+		t.Fatalf("got %T, want *ast.NullValue", v)
 	}
 }
 

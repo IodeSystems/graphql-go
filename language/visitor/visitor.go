@@ -66,6 +66,7 @@ var QueryDocumentKeys = KeyMap{
 	"StringValue":  []string{},
 	"BooleanValue": []string{},
 	"EnumValue":    []string{},
+	"NullValue":    []string{},
 	"ListValue":    []string{"Values"},
 	"ObjectValue":  []string{"Fields"},
 	"ObjectField": []string{

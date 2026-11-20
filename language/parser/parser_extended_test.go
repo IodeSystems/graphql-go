@@ -806,8 +806,8 @@ func TestParse_NullValue(t *testing.T) {
 		Source:  `{ field(arg: null) }`,
 		Options: ParseOptions{NoLocation: true, NoSource: true},
 	})
-	if err == nil {
-		t.Fatal("expected an error for null value")
+	if err != nil {
+		t.Fatalf("null value: %v", err)
 	}
 }
 

@@ -300,6 +300,8 @@ func (w *fingerprintWriter) writeValue(v ast.Value) {
 	case *ast.EnumValue:
 		w.writeByte('e')
 		w.writeString(n.Value)
+	case *ast.NullValue:
+		w.writeByte('N')
 	case *ast.ListValue:
 		w.writeByte('[')
 		for _, item := range n.Values {
@@ -421,6 +423,13 @@ func (c *normCtx) tryExtract(value ast.Value, expected Input) (ast.Value, bool) 
 		return value, false
 	}
 	if expected == nil {
+		return value, false
+	}
+	// An invalid literal stays in place so validation reports it
+	// against the literal. Extracted, it would pass validation as a
+	// variable: `[Int!]` given `[null]` would coerce to [nil], and
+	// `[Int]` given `[1, "x"]` to [1, nil].
+	if ok, _ := isValidLiteralValue(expected, value); !ok {
 		return value, false
 	}
 	// Coerce literal once at extract time. We pass nil variableValues

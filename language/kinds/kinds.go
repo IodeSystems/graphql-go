@@ -24,6 +24,7 @@ const (
 	StringValue  = "StringValue"
 	BooleanValue = "BooleanValue"
 	EnumValue    = "EnumValue"
+	NullValue    = "NullValue"
 	ListValue    = "ListValue"
 	ObjectValue  = "ObjectValue"
 	ObjectField  = "ObjectField"

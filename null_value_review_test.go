@@ -27,3 +27,22 @@ func TestPlanCache_VariableDefaultsInKey(t *testing.T) {
 		t.Fatal("= null into Int! reused the cached valid plan")
 	}
 }
+
+// Directives are part of the plan-cache key: the planner evaluates a
+// literal @skip/@include at plan time.
+func TestPlanCache_DirectivesInKey(t *testing.T) {
+	schema := nullTestSchema(t)
+	cache := graphql.NewPlanCache(graphql.PlanCacheOptions{Normalize: true})
+	for _, c := range []struct{ query, want string }{
+		{`{ f @skip(if: true) dn }`, `{"data":{"dn":"{\"a\":null}"}}`},
+		{`{ f @skip(if: false) dn }`, `{"data":{"dn":"{\"a\":null}","f":"{\"b\":5}"}}`},
+		{`{ ... @include(if: false) { f } dn }`, `{"data":{"dn":"{\"a\":null}"}}`},
+		{`{ ... @include(if: true) { f } dn }`, `{"data":{"dn":"{\"a\":null}","f":"{\"b\":5}"}}`},
+		{`{ ...F @include(if: false) dn } fragment F on Query { f }`, `{"data":{"dn":"{\"a\":null}"}}`},
+		{`{ ...F @include(if: true) dn } fragment F on Query { f }`, `{"data":{"dn":"{\"a\":null}","f":"{\"b\":5}"}}`},
+	} {
+		if got := runAllPaths(t, &schema, cache, c.query, nil); got != c.want {
+			t.Errorf("%s\n  got  %s\n  want %s", c.query, got, c.want)
+		}
+	}
+}

@@ -426,8 +426,55 @@ func TestInputObjectAddFieldConfig_WithThunk(t *testing.T) {
 		}),
 	})
 	io.AddFieldConfig("b", &graphql.InputObjectFieldConfig{Type: graphql.Int})
-	if io.Error() == nil {
-		t.Fatal("expected error when adding field to thunk-based input object")
+	if io.Error() != nil {
+		t.Fatalf("unexpected error: %v", io.Error())
+	}
+	fields := io.Fields()
+	if _, ok := fields["a"]; !ok {
+		t.Fatal("thunk field a missing")
+	}
+	if _, ok := fields["b"]; !ok {
+		t.Fatal("field b not added to thunk-defined input object")
+	}
+}
+
+// upstream #543: AddFieldConfig on a FieldsThunk-defined Object, before and
+// after the fields were first resolved.
+func TestObjectAddFieldConfig_WithThunk(t *testing.T) {
+	newObj := func() *graphql.Object {
+		return graphql.NewObject(graphql.ObjectConfig{Name: "O", Fields: graphql.FieldsThunk(func() graphql.Fields {
+			return graphql.Fields{"a": &graphql.Field{Type: graphql.String}}
+		})})
+	}
+	o := newObj()
+	o.AddFieldConfig("b", &graphql.Field{Type: graphql.String})
+	if _, ok := o.Fields()["b"]; !ok {
+		t.Fatal("field b not added to thunk-defined object")
+	}
+	o = newObj()
+	_ = o.Fields()
+	o.AddFieldConfig("b", &graphql.Field{Type: graphql.String})
+	f := o.Fields()
+	if _, ok := f["a"]; !ok {
+		t.Fatal("thunk field a lost")
+	}
+	if _, ok := f["b"]; !ok {
+		t.Fatal("field b not added after fields were resolved")
+	}
+}
+
+func TestInterfaceAddFieldConfig_WithThunk(t *testing.T) {
+	i := graphql.NewInterface(graphql.InterfaceConfig{Name: "I", Fields: graphql.FieldsThunk(func() graphql.Fields {
+		return graphql.Fields{"a": &graphql.Field{Type: graphql.String}}
+	})})
+	_ = i.Fields()
+	i.AddFieldConfig("b", &graphql.Field{Type: graphql.String})
+	f := i.Fields()
+	if _, ok := f["a"]; !ok {
+		t.Fatal("thunk field a lost")
+	}
+	if _, ok := f["b"]; !ok {
+		t.Fatal("field b not added to thunk-defined interface")
 	}
 }
 

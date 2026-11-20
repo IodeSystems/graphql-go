@@ -430,8 +430,20 @@ func (gt *Object) AddFieldConfig(fieldName string, fieldConfig *Field) {
 	if fieldName == "" || fieldConfig == nil {
 		return
 	}
-	if fields, ok := gt.typeConfig.Fields.(Fields); ok {
+	switch fields := gt.typeConfig.Fields.(type) {
+	case Fields:
 		fields[fieldName] = fieldConfig
+		gt.initialisedFields = false
+	case FieldsThunk:
+		// Wrap the thunk so the added field is applied whenever it resolves.
+		gt.typeConfig.Fields = FieldsThunk(func() Fields {
+			resolved := Fields{}
+			for k, f := range fields() {
+				resolved[k] = f
+			}
+			resolved[fieldName] = fieldConfig
+			return resolved
+		})
 		gt.initialisedFields = false
 	}
 }
@@ -775,8 +787,20 @@ func (it *Interface) AddFieldConfig(fieldName string, fieldConfig *Field) {
 	if fieldName == "" || fieldConfig == nil {
 		return
 	}
-	if fields, ok := it.typeConfig.Fields.(Fields); ok {
+	switch fields := it.typeConfig.Fields.(type) {
+	case Fields:
 		fields[fieldName] = fieldConfig
+		it.initialisedFields = false
+	case FieldsThunk:
+		// Wrap the thunk so the added field is applied whenever it resolves.
+		it.typeConfig.Fields = FieldsThunk(func() Fields {
+			resolved := Fields{}
+			for k, f := range fields() {
+				resolved[k] = f
+			}
+			resolved[fieldName] = fieldConfig
+			return resolved
+		})
 		it.initialisedFields = false
 	}
 }
@@ -1261,11 +1285,23 @@ func (gt *InputObject) AddFieldConfig(fieldName string, fieldConfig *InputObject
 	if fieldName == "" || fieldConfig == nil {
 		return
 	}
-	fieldMap, ok := gt.typeConfig.Fields.(InputObjectConfigFieldMap)
-	if gt.err = invariant(ok, "Cannot add field to a thunk"); gt.err != nil {
+	switch fields := gt.typeConfig.Fields.(type) {
+	case InputObjectConfigFieldMap:
+		fields[fieldName] = fieldConfig
+	case InputObjectConfigFieldMapThunk:
+		// Wrap the thunk so the added field is applied whenever it resolves.
+		gt.typeConfig.Fields = InputObjectConfigFieldMapThunk(func() InputObjectConfigFieldMap {
+			resolved := InputObjectConfigFieldMap{}
+			for k, f := range fields() {
+				resolved[k] = f
+			}
+			resolved[fieldName] = fieldConfig
+			return resolved
+		})
+	default:
+		gt.err = invariant(false, "Cannot add field to a type without fields")
 		return
 	}
-	fieldMap[fieldName] = fieldConfig
 	gt.fields = gt.defineFieldMap()
 }
 

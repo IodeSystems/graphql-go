@@ -174,6 +174,11 @@ func (w *fingerprintWriter) writeVariableDefs(defs []*ast.VariableDefinition) {
 		w.writeString(d.Variable.Name.Value)
 		w.writeByte(':')
 		w.writeType(d.Type)
+		// The default is part of the key: the plan reads defaults from
+		// the operation it was built from, and validation of the
+		// default (`$v: Int = null` into Int!) runs only on a miss.
+		w.writeByte('=')
+		w.writeValue(d.DefaultValue)
 		w.writeByte(',')
 	}
 	w.writeByte(')')

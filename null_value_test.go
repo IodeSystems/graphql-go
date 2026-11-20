@@ -29,6 +29,12 @@ func nullTestSchema(t *testing.T) graphql.Schema {
 			"n": &graphql.InputObjectFieldConfig{Type: graphql.Int, DefaultValue: graphql.ExplicitNull},
 		},
 	})
+	inDef := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name: "InDef",
+		Fields: graphql.InputObjectConfigFieldMap{
+			"x": &graphql.InputObjectFieldConfig{Type: graphql.NewNonNull(graphql.Int), DefaultValue: 5},
+		},
+	})
 	inReq := graphql.NewInputObject(graphql.InputObjectConfig{
 		Name: "InReq",
 		Fields: graphql.InputObjectConfigFieldMap{
@@ -65,6 +71,18 @@ func nullTestSchema(t *testing.T) graphql.Schema {
 				Args:    graphql.FieldConfigArgument{"a": &graphql.ArgumentConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.Int))}},
 				Resolve: argsJSON,
 			},
+			"h": &graphql.Field{
+				Type:    graphql.String,
+				Args:    graphql.FieldConfigArgument{"in": &graphql.ArgumentConfig{Type: inDef}},
+				Resolve: argsJSON,
+			},
+			"nd": &graphql.Field{
+				Type: graphql.String,
+				Args: graphql.FieldConfigArgument{
+					"a": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.Int), DefaultValue: graphql.ExplicitNull},
+				},
+				Resolve: argsJSON,
+			},
 			"g": &graphql.Field{
 				Type:    graphql.String,
 				Args:    graphql.FieldConfigArgument{"o": &graphql.ArgumentConfig{Type: inReq}},
@@ -82,8 +100,9 @@ func nullTestSchema(t *testing.T) graphql.Schema {
 // runAllPaths executes query through graphql.Do, ExecutePlan and
 // ExecutePlanAppend (each planned via a normalizing PlanCache) and
 // returns the JSON bodies. It fails the test when they disagree.
-func runAllPaths(t *testing.T, schema graphql.Schema, cache *graphql.PlanCache, query string, vars map[string]interface{}) string {
+func runAllPaths(t *testing.T, schemaPtr *graphql.Schema, cache *graphql.PlanCache, query string, vars map[string]interface{}) string {
 	t.Helper()
+	schema := *schemaPtr
 	doRes := graphql.Do(graphql.Params{Schema: schema, RequestString: query, VariableValues: vars})
 	doBytes, err := json.Marshal(envelope(doRes))
 	if err != nil {
@@ -99,7 +118,7 @@ func runAllPaths(t *testing.T, schema graphql.Schema, cache *graphql.PlanCache, 
 		return string(doBytes)
 	}
 
-	pr := cache.Get(&schema, query, "")
+	pr := cache.Get(schemaPtr, query, "")
 	if len(pr.Errors) > 0 {
 		t.Fatalf("cache.Get %q: %v", query, pr.Errors)
 	}
@@ -157,7 +176,7 @@ func TestNullLiteral_Arguments(t *testing.T) {
 		{`query($v: Int) { f(a: null, list: [$v]) }`, `{"data":{"f":"{\"a\":null,\"b\":5,\"list\":[null]}"}}`},
 	}
 	for _, c := range cases {
-		if got := runAllPaths(t, schema, cache, c.query, nil); got != c.want {
+		if got := runAllPaths(t, &schema, cache, c.query, nil); got != c.want {
 			t.Errorf("%s\n  got  %s\n  want %s", c.query, got, c.want)
 		}
 	}
@@ -206,11 +225,11 @@ func TestNullLiteral_VariableDefaults(t *testing.T) {
 		t.Errorf("want %q, got %v", want, res.Errors)
 	}
 	// A non-null default still does.
-	got := runAllPaths(t, schema, cache, `query($v: Int = 2) { req(a: $v) }`, nil)
+	got := runAllPaths(t, &schema, cache, `query($v: Int = 2) { req(a: $v) }`, nil)
 	if got != `{"data":{"req":"{\"a\":2}"}}` {
 		t.Errorf("got %s", got)
 	}
-	got = runAllPaths(t, schema, cache, `query($v: In = {x: null}) { f(obj: $v) }`, nil)
+	got = runAllPaths(t, &schema, cache, `query($v: In = {x: null}) { f(obj: $v) }`, nil)
 	if got != `{"data":{"f":"{\"b\":5,\"obj\":{\"n\":null,\"x\":null,\"y\":7}}"}}` {
 		t.Errorf("got %s", got)
 	}
@@ -296,7 +315,7 @@ func TestNullVariable_ProvidedVersusAbsent(t *testing.T) {
 			`{"data":{"f":"{\"b\":5,\"obj\":{\"n\":null,\"y\":7}}"}}`},
 	}
 	for _, c := range cases {
-		if got := runAllPaths(t, schema, cache, c.query, c.vars); got != c.want {
+		if got := runAllPaths(t, &schema, cache, c.query, c.vars); got != c.want {
 			t.Errorf("%s %v\n  got  %s\n  want %s", c.query, c.vars, got, c.want)
 		}
 	}

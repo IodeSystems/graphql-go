@@ -1,6 +1,8 @@
 package graphql_test
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/IodeSystems/graphql-go/v2"
@@ -275,5 +277,61 @@ func TestPlanCacheNormalizeVariableTypes(t *testing.T) {
 	}
 	if len(plans) != len(queries) {
 		t.Fatalf("expected %d distinct plans across NonNull/Nullable/List variable shapes, got %d", len(queries), len(plans))
+	}
+}
+
+// Directives are evaluated at plan time for literal @skip/@include,
+// so queries differing only in directive arguments must not share a plan.
+func TestPlanCacheNormalizeDirectivesFingerprinted(t *testing.T) {
+	schema := buildNormalizeTestSchema(t)
+	cases := []struct {
+		name string
+		a, b string
+	}{
+		{"SkipField", `{ echoInt @skip(if: true) }`, `{ echoInt @skip(if: false) }`},
+		{"IncludeField", `{ echoInt @include(if: true) }`, `{ echoInt @include(if: false) }`},
+		{"SkipVsInclude", `{ echoInt @skip(if: true) }`, `{ echoInt @include(if: true) }`},
+		{"InlineFragment", `{ widget { ... on Widget @skip(if: true) { name } } }`, `{ widget { ... on Widget @skip(if: false) { name } } }`},
+		{"FragmentSpread",
+			`{ widget { ...F @skip(if: true) } } fragment F on Widget { name }`,
+			`{ widget { ...F @skip(if: false) } } fragment F on Widget { name }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := graphql.NewPlanCache(graphql.PlanCacheOptions{Normalize: true})
+			r1 := cache.Get(&schema, tc.a, "")
+			if r1.Plan == nil && len(r1.Errors) > 0 {
+				t.Fatalf("a: %v", r1.Errors)
+			}
+			r2 := cache.Get(&schema, tc.b, "")
+			if r2.Plan == nil && len(r2.Errors) > 0 {
+				t.Fatalf("b: %v", r2.Errors)
+			}
+			if r1.Plan == r2.Plan {
+				t.Fatalf("different directive arguments must not share a plan")
+			}
+		})
+	}
+}
+
+// A plan reads variable defaults from the operation it was built from,
+// so the default must be part of the cache key.
+func TestPlanCacheNormalizeVariableDefaultsFingerprinted(t *testing.T) {
+	schema := buildNormalizeTestSchema(t)
+	cache := graphql.NewPlanCache(graphql.PlanCacheOptions{Normalize: true})
+	for _, want := range []int{5, 7, 5} {
+		q := fmt.Sprintf(`query($v: Int = %d) { echoInt(v: $v) }`, want)
+		r := cache.Get(&schema, q, "")
+		if len(r.Errors) > 0 || r.Plan == nil {
+			t.Fatalf("%s: %v", q, r.Errors)
+		}
+		res := graphql.ExecutePlan(r.Plan, graphql.ExecuteParams{Schema: schema, Context: context.Background()})
+		if len(res.Errors) > 0 {
+			t.Fatalf("%s: %v", q, res.Errors)
+		}
+		got := res.Data.(map[string]interface{})["echoInt"]
+		if got != want {
+			t.Fatalf("%s: echoInt = %v, want %d", q, got, want)
+		}
 	}
 }

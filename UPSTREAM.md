@@ -10,6 +10,7 @@ bin/upstream            # commits upstream has that nobody here has judged
 bin/upstream --all      # every commit since the sync point, with its decision
 bin/upstream --ledger   # every recorded decision, newest first
 bin/upstream --check    # exit 1 if anything is undecided or the ledger is malformed
+bin/upstream issues     # open upstream issues/PRs nobody has triaged (upstream-issues.jsonl)
 ```
 
 **Last absorbed:** `6acef3563ff762c0f5cd14b759ed2cca405ac8fa` (2026-06-22,
@@ -22,6 +23,7 @@ maintained by hand — `bin/upstream` derives the sync point from
 ```
 git fetch upstream
 bin/upstream            # the work queue
+bin/upstream issues     # open issues/PRs with no entry in upstream-issues.jsonl
 ```
 
 For each commit listed, cherry-pick it (`git cherry-pick -n <sha>`), resolve
@@ -34,6 +36,9 @@ bin/upstream record <sha> absorbed "what was adapted and why" --local <our-sha>
 bin/upstream record <sha> skipped  "why it is not worth taking"
 bin/upstream record <sha> net-zero "what it cancels against"
 ```
+
+Record issue and PR decisions the same way, with `bin/upstream
+record-issue <issue|pr> <number> <status> <rationale> [--local <sha>]`.
 
 Record refusals too. An unrecorded commit is indistinguishable from one
 nobody has looked at, so the next sync re-derives the same decision.
@@ -75,6 +80,9 @@ In `upstream.jsonl`. Run `bin/upstream --ledger` to read them, or
 
 ## Open upstream issues
 
+Source of truth: `upstream-issues.jsonl` (one entry per triaged item).
+Run `bin/upstream issues` for the untriaged queue. The prose below is history.
+
 Triaged 2026-08-17 against the then-open issues on `graphql-go/graphql`.
 Re-check with `gh issue list --repo graphql-go/graphql --state open`.
 
@@ -107,6 +115,9 @@ data with field errors. The rest are questions, feature requests, or
 upstream-workflow issues.
 
 ## Open upstream PRs
+
+Source of truth: `upstream-issues.jsonl` (one entry per triaged item).
+Run `bin/upstream issues` for the untriaged queue. The prose below is history.
 
 Triaged 2026-08-17 against the 38 then-open PRs on `graphql-go/graphql`.
 Re-check with `gh pr list --repo graphql-go/graphql --state open`; only

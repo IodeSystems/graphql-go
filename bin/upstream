@@ -22,6 +22,23 @@ Usage:
   bin/upstream record <hash> <status> <rationale>   # append an entry
   bin/upstream record <hash> <status> <rationale> --local <sha>
 
+Issues and PRs (ledger: upstream-issues.jsonl):
+  bin/upstream issues             # open upstream issues/PRs with no entry (triage queue)
+  bin/upstream issues --all       # every open item, with its status
+  bin/upstream issues --json      # machine-readable
+  bin/upstream issues --check     # exit 1 if anything is untriaged or malformed
+  bin/upstream record-issue <issue|pr> <number> <status> <rationale>
+                            [--local <sha>] [--fork-issue <N>]
+  Open items come from `gh api repos/graphql-go/graphql/issues` (paginated).
+
+Issue/PR statuses:
+  fixed         fixed in this fork; --local <sha> required
+  already-here  fixed earlier, or this fork was never affected
+  adapted       PR taken in modified form
+  skipped       deliberately not taken; rationale must say why
+  not-a-bug     reproduced; behavior is correct
+  question      question, feature request or workflow; no action
+
 Statuses:
   absorbed  content is in this fork (via cherry-pick, or fixed independently)
   skipped   deliberately not taken; rationale must say why
@@ -32,8 +49,10 @@ Environment:
   UPSTREAM_BRANCH  branch on that remote (default: master)
 """
 
+import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -44,6 +63,10 @@ REPO = subprocess.run(
     capture_output=True, text=True, check=True,
 ).stdout.strip()
 LEDGER = os.path.join(REPO, "upstream.jsonl")
+ISSUE_LEDGER = os.path.join(REPO, "upstream-issues.jsonl")
+ISSUE_STATUSES = ("fixed", "already-here", "adapted", "skipped", "not-a-bug", "question")
+ISSUE_KINDS = ("issue", "pr")
+GH_REPO = os.environ.get("UPSTREAM_GH_REPO", "graphql-go/graphql")
 REMOTE = os.environ.get("UPSTREAM_REMOTE", "upstream")
 BRANCH = os.environ.get("UPSTREAM_BRANCH", "master")
 REF = f"{REMOTE}/{BRANCH}"
@@ -200,8 +223,188 @@ def cmd_record(argv):
     print(f"recorded {short} as {status}")
 
 
+def load_issue_ledger():
+    """Issue/PR ledger entries plus malformed-line complaints."""
+    entries, problems = [], []
+    if not os.path.exists(ISSUE_LEDGER):
+        return entries, problems
+    seen = {}
+    with open(ISSUE_LEDGER) as fh:
+        for n, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            where = f"{ISSUE_LEDGER}:{n}"
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError as exc:
+                problems.append(f"{where}: invalid JSON ({exc.msg})")
+                continue
+            missing = [k for k in ("kind", "number", "title", "status", "rationale", "date")
+                       if not e.get(k)]
+            if missing:
+                problems.append(f"{where}: missing {', '.join(missing)}")
+                continue
+            if e["kind"] not in ISSUE_KINDS:
+                problems.append(f"{where}: unknown kind {e['kind']!r}")
+                continue
+            if not isinstance(e["number"], int):
+                problems.append(f"{where}: number must be an integer")
+                continue
+            if e["status"] not in ISSUE_STATUSES:
+                problems.append(
+                    f"{where}: unknown status {e['status']!r}"
+                    f" (want one of: {', '.join(ISSUE_STATUSES)})"
+                )
+                continue
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(e["date"])):
+                problems.append(f"{where}: date must be YYYY-MM-DD")
+                continue
+            if e["status"] == "fixed" and not e.get("local"):
+                problems.append(f"{where}: status fixed needs a local sha")
+                continue
+            if e.get("local") and resolve(e["local"]) is None:
+                problems.append(f"{where}: local {e['local']} not found in this repo")
+            if e.get("fork_issue") is not None and not isinstance(e["fork_issue"], int):
+                problems.append(f"{where}: fork_issue must be an integer")
+                continue
+            key = (e["kind"], e["number"])
+            if key in seen:
+                problems.append(f"{where}: duplicate of line {seen[key]}")
+                continue
+            seen[key] = n
+            e["_line"] = n
+            entries.append(e)
+    return entries, problems
+
+
+def gh_get(path):
+    r = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"gh api {path}: {r.stderr.strip()}")
+    return r.stdout
+
+
+def gh_open_items():
+    """Open upstream issues and PRs, by number. One gh call per page of 100."""
+    items, page = [], 1
+    while True:
+        out = gh_get(f"repos/{GH_REPO}/issues?state=open&per_page=100&page={page}")
+        batch = json.loads(out)
+        for it in batch:
+            items.append({
+                "kind": "pr" if "pull_request" in it else "issue",
+                "number": it["number"],
+                "title": it["title"],
+                "date": (it.get("created_at") or "")[:10],
+            })
+        if len(batch) < 100:
+            break
+        page += 1
+    return sorted(items, key=lambda i: i["number"])
+
+
+def cmd_issues(argv):
+    as_json = "--json" in argv
+    argv = [a for a in argv if a != "--json"]
+    mode = argv[0] if argv else ""
+    if mode not in ("", "--all", "--check"):
+        die(f"unknown option {mode!r} - see bin/upstream --help")
+    entries, problems = load_issue_ledger()
+    by_key = {(e["kind"], e["number"]): e for e in entries}
+    items = gh_open_items()
+    for it in items:
+        e = by_key.get((it["kind"], it["number"]))
+        it["status"] = e["status"] if e else None
+        it["rationale"] = e["rationale"] if e else None
+    untriaged = [i for i in items if i["status"] is None]
+    shown = items if mode == "--all" else untriaged
+
+    if as_json:
+        print(json.dumps({"repo": GH_REPO, "open": len(items),
+                          "untriaged": len(untriaged), "items": shown,
+                          "problems": problems}, indent=2))
+    else:
+        print(f"{GH_REPO}: {len(items)} open, {len(untriaged)} untriaged")
+        print()
+        for i in shown:
+            st = (i["status"] or "UNTRIAGED").ljust(12)
+            line = f"{i['kind']:<5} #{i['number']:<5} {i['date']}  "
+            print(line + (st + "  " if mode == "--all" else "") + i["title"])
+            if mode == "--all" and i["rationale"]:
+                print(" " * 22 + i["rationale"])
+        if untriaged and mode != "--all":
+            print()
+            print("Record a decision with:")
+            print("  bin/upstream record-issue <issue|pr> <number> <status> <rationale>"
+                  " [--local <sha>] [--fork-issue <N>]")
+    for p in problems:
+        print(f"upstream: {p}", file=sys.stderr)
+    if mode == "--check" and (untriaged or problems):
+        sys.exit(1)
+
+
+def cmd_record_issue(argv):
+    opts = {}
+    for flag in ("--local", "--fork-issue"):
+        if flag in argv:
+            i = argv.index(flag)
+            if i + 1 >= len(argv):
+                die(f"{flag} needs a value")
+            opts[flag] = argv[i + 1]
+            argv = argv[:i] + argv[i + 2:]
+    if len(argv) < 4:
+        die("usage: bin/upstream record-issue <issue|pr> <number> <status> "
+            "<rationale> [--local <sha>] [--fork-issue <N>]")
+    kind, num, status, rationale = argv[0], argv[1], argv[2], " ".join(argv[3:])
+    if kind not in ISSUE_KINDS:
+        die(f"unknown kind {kind!r} (want issue or pr)")
+    if not num.lstrip("#").isdigit():
+        die(f"bad number {num!r}")
+    num = int(num.lstrip("#"))
+    if status not in ISSUE_STATUSES:
+        die(f"unknown status {status!r} (want one of: {', '.join(ISSUE_STATUSES)})")
+    local = opts.get("--local")
+    if status == "fixed" and not local:
+        die("status fixed needs --local <sha>")
+    entries, _ = load_issue_ledger()
+    for e in entries:
+        if (e["kind"], e["number"]) == (kind, num):
+            die(f"{kind} #{num} already recorded as {e['status']} "
+                f"at {ISSUE_LEDGER}:{e['_line']} - edit that line instead")
+    item = json.loads(gh_get(f"repos/{GH_REPO}/issues/{num}"))
+    actual = "pr" if "pull_request" in item else "issue"
+    if actual != kind:
+        die(f"#{num} is a {actual}, not a {kind}")
+    rec = {"kind": kind, "number": num, "title": item["title"], "status": status,
+           "rationale": rationale, "date": datetime.date.today().isoformat()}
+    if local:
+        lf = resolve(local)
+        if lf is None:
+            die(f"--local {local} not found in this repo")
+        rec["local"] = git("rev-parse", "--short", lf)
+    if "--fork-issue" in opts:
+        if not opts["--fork-issue"].isdigit():
+            die("--fork-issue must be a number")
+        rec["fork_issue"] = int(opts["--fork-issue"])
+    needs_nl = (
+        os.path.exists(ISSUE_LEDGER)
+        and os.path.getsize(ISSUE_LEDGER) > 0
+        and open(ISSUE_LEDGER, "rb").read()[-1:] != b"\n"
+    )
+    with open(ISSUE_LEDGER, "a") as fh:
+        if needs_nl:
+            fh.write("\n")
+        fh.write(json.dumps(rec) + "\n")
+    print(f"recorded {kind} #{num} as {status}")
+
+
 def main():
     argv = sys.argv[1:]
+    if argv and argv[0] == "issues":
+        return cmd_issues(argv[1:])
+    if argv and argv[0] == "record-issue":
+        return cmd_record_issue(argv[1:])
     if argv and argv[0] == "record":
         return cmd_record(argv[1:])
 

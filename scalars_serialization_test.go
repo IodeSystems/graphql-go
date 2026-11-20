@@ -1,6 +1,7 @@
 package graphql_test
 
 import (
+	"encoding/json"
 	"math"
 	"reflect"
 	"testing"
@@ -58,6 +59,11 @@ func TestTypeSystem_Scalar_SerializesOutputInt(t *testing.T) {
 		{float64(1e100), nil},
 		{float64(-1e100), nil},
 		{"-1.1", -1},
+		{json.Number("42"), 42},
+		{json.Number("-1.1"), -1},
+		{json.Number("1e3"), 1000},
+		{json.Number("9876504321"), nil},
+		{json.Number("one"), nil},
 		{"one", nil},
 		{false, 0},
 		{true, 1},
@@ -111,6 +117,9 @@ func TestTypeSystem_Scalar_SerializesOutputFloat(t *testing.T) {
 		{float64(1.1), float64(1.1)},
 		{float64(-1.1), float64(-1.1)},
 		{"-1.1", -1.1},
+		{json.Number("1.5"), 1.5},
+		{json.Number("42"), 42.0},
+		{json.Number("one"), nil},
 		{"one", nil},
 		{false, 0.0},
 		{true, 1.0},
@@ -195,5 +204,28 @@ func TestTypeSystem_Scalar_SerializeOutputDateTime(t *testing.T) {
 			reflectedValue := reflect.ValueOf(test.Value)
 			t.Fatalf("Failed DateTime.Serialize(%v(%v)), expected: %v, got %v", reflectedValue.Type(), test.Value, test.Expected, val)
 		}
+	}
+}
+
+// upstream #647: json.Number results serialize as Int/Float on the
+// append (zero-allocation) path as well.
+func TestTypeSystem_Scalar_JSONNumberAppendMode(t *testing.T) {
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{Query: graphql.NewObject(graphql.ObjectConfig{
+		Name: "Query",
+		Fields: graphql.Fields{
+			"i": &graphql.Field{Type: graphql.Int, Resolve: func(graphql.ResolveParams) (interface{}, error) {
+				return json.Number("42"), nil
+			}},
+			"f": &graphql.Field{Type: graphql.Float, Resolve: func(graphql.ResolveParams) (interface{}, error) {
+				return json.Number("1.5"), nil
+			}},
+		},
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(graphql.DoAppend(graphql.Params{Schema: schema, RequestString: `{i f}`}, nil))
+	if got != `{"data":{"i":42,"f":1.5}}` {
+		t.Fatalf("got %s", got)
 	}
 }

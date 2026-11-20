@@ -1,6 +1,7 @@
 package graphql
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -132,6 +133,15 @@ func coerceInt(value interface{}) interface{} {
 			return nil
 		}
 		return coerceInt(*value)
+	case json.Number:
+		if n, err := value.Int64(); err == nil {
+			return coerceInt(n)
+		}
+		val, err := value.Float64()
+		if err != nil {
+			return nil
+		}
+		return coerceInt(val)
 	case string:
 		val, err := strconv.ParseFloat(value, 0)
 		if err != nil {
@@ -177,6 +187,17 @@ func parseIntValue(value interface{}) interface{} {
 			return nil
 		}
 		return parseIntValue(*value)
+	case json.Number:
+		// Integral numbers only, as for float64; "1e3" and "2.0" are
+		// integral, "2.5" is not.
+		if n, err := value.Int64(); err == nil {
+			return coerceInt(n)
+		}
+		f, err := value.Float64()
+		if err != nil {
+			return nil
+		}
+		return parseIntValue(f)
 	}
 	return coerceInt(value)
 }
@@ -296,6 +317,12 @@ func coerceFloat(value interface{}) interface{} {
 			return nil
 		}
 		return coerceFloat(*value)
+	case json.Number:
+		val, err := value.Float64()
+		if err != nil {
+			return nil
+		}
+		return val
 	case string:
 		val, err := strconv.ParseFloat(value, 0)
 		if err != nil {

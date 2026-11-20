@@ -224,3 +224,56 @@ func BenchmarkPrint(b *testing.B) {
 		_ = printer.Print(astDoc)
 	}
 }
+
+func TestPrintBlockStringDescriptionRoundTrip(t *testing.T) {
+	descs := []string{
+		`Representation of a "Foo"`,
+		`ends with quote"`,
+		`ends with two quotes""`,
+		`contains """ triple`,
+		`ends with triple"""`,
+		`""" starts with triple`,
+		`ends with backslash\`,
+		`backslash before triple \"""`,
+		`  leading whitespace`,
+		`  leading whitespace and quote"`,
+		"multi\nline \"quoted\"",
+		"multi\nline ends with quote\"",
+		"multi\n  indented \"\"\" triple\nbackslash\\",
+		"  deeper first line\nshallow second",
+		`x`,
+	}
+	for _, desc := range descs {
+		doc := parse(t, `"x" type Foo { "x" a: Int }`)
+		obj := doc.Definitions[0].(*ast.ObjectDefinition)
+		obj.Description.Value = desc
+		obj.Fields[0].Description.Value = desc
+		out := printer.Print(doc).(string)
+		reparsed, err := parser.Parse(parser.ParseParams{Source: out, Options: parser.ParseOptions{NoLocation: true}})
+		if err != nil {
+			t.Errorf("desc %q: printed SDL does not reparse: %v\n%s", desc, err, out)
+			continue
+		}
+		robj := reparsed.Definitions[0].(*ast.ObjectDefinition)
+		if got := robj.Description.Value; got != desc {
+			t.Errorf("object desc: want %q, got %q\n%s", desc, got, out)
+		}
+		if got := robj.Fields[0].Description.Value; got != desc {
+			t.Errorf("field desc: want %q, got %q\n%s", desc, got, out)
+		}
+	}
+}
+
+// Upstream issues 677, 641.
+func TestPrintReparsesDescriptionWithQuotes(t *testing.T) {
+	for _, src := range []string{
+		"\"\"\"\nRepresentation of a \"Foo\"\n\"\"\"\ntype Foo {\n  name: String\n}\n",
+		`"test \"quoted\"" type myObject { a: Int }`,
+	} {
+		doc := parse(t, src)
+		out := printer.Print(doc).(string)
+		if _, err := parser.Parse(parser.ParseParams{Source: out}); err != nil {
+			t.Errorf("printed SDL does not reparse: %v\n%s", err, out)
+		}
+	}
+}

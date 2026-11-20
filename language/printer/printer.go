@@ -82,11 +82,20 @@ func getDescription(raw interface{}) string {
 		desc = getMapValueString(node, "Description.Value")
 	}
 	if desc != "" {
-		sep := ""
+		// Escape embedded triple quotes, as graphql-js printBlockString does.
+		// The lexer treats a backslash specially only before `"""`.
+		desc = strings.Replace(desc, `"""`, `\"""`, -1)
+		// A trailing `"` would merge with the closing quotes, and a trailing
+		// `\` would escape them: put the closing quotes on their own line.
 		if strings.ContainsRune(desc, '\n') {
-			sep = "\n"
+			desc = join([]string{`"""`, desc, `"""`}, "\n")
+		} else if strings.HasSuffix(desc, `"`) || strings.HasSuffix(desc, `\`) {
+			// Keep the opening inline: a leading newline would make the
+			// lexer strip this line's leading whitespace as common indent.
+			desc = `"""` + desc + "\n" + `"""`
+		} else {
+			desc = `"""` + desc + `"""`
 		}
-		desc = join([]string{`"""`, desc, `"""`}, sep)
 	}
 	return desc
 }

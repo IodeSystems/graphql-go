@@ -842,3 +842,62 @@ func TestAppendThunkedResolvers(t *testing.T) {
 		t.Fatalf("thunk parity:\n  append: %s\n  map:    %s", got, got2)
 	}
 }
+
+// Upstream #546: a nil map (object/interface/union)
+// resolves to null, like a nil pointer. A nil slice stays an empty list.
+func TestNilMapAndSliceAreNull(t *testing.T) {
+	type Product struct {
+		Obj   map[string]interface{}
+		Req   map[string]interface{}
+		List  []string
+		Empty map[string]interface{}
+	}
+	nested := graphql.NewObject(graphql.ObjectConfig{Name: "Nested", Fields: graphql.Fields{
+		"field": &graphql.Field{Type: graphql.NewNonNull(graphql.String)}}})
+	product := graphql.NewObject(graphql.ObjectConfig{Name: "Product", Fields: graphql.Fields{
+		"obj":  &graphql.Field{Type: nested},
+		"req":  &graphql.Field{Type: graphql.NewNonNull(nested)},
+		"list": &graphql.Field{Type: graphql.NewList(graphql.String)},
+		"empty": &graphql.Field{Type: graphql.NewObject(graphql.ObjectConfig{Name: "Loose", Fields: graphql.Fields{
+			"x": &graphql.Field{Type: graphql.String}}})},
+	}})
+	root := Product{Empty: map[string]interface{}{}}
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{Query: graphql.NewObject(graphql.ObjectConfig{Name: "Query", Fields: graphql.Fields{
+		"product": &graphql.Field{Type: product, Resolve: func(graphql.ResolveParams) (interface{}, error) { return root, nil }},
+	}})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ name, query, want string }{
+		{"nullable object", `{product{obj{field}}}`, `{"data":{"product":{"obj":null}}}`},
+		{"nil slice stays empty list", `{product{list}}`, `{"data":{"product":{"list":[]}}}`},
+		{"empty map stays object", `{product{empty{x}}}`, `{"data":{"product":{"empty":{"x":null}}}}`},
+		{"non-null object bubbles", `{product{req{field}}}`, `{"data":{"product":null},"errors":[{"message":"Cannot return null for non-nullable field Product.req.","locations":[{"line":1,"column":10}],"path":["product","req"]}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runParity(t, schema, tc.query, "", nil, nil)
+			doc, err := parser.Parse(parser.ParseParams{Source: source.NewSource(&source.Source{Body: []byte(tc.query)})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := graphql.PlanQuery(&schema, doc, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ep := graphql.ExecuteParams{Schema: schema, AST: doc, Context: context.Background()}
+			got, _ := graphql.ExecutePlanAppend(plan, ep, nil)
+			b, _ := json.Marshal(graphql.ExecutePlan(plan, ep))
+			var g, w, m interface{}
+			_ = json.Unmarshal(got, &g)
+			_ = json.Unmarshal([]byte(tc.want), &w)
+			_ = json.Unmarshal(b, &m)
+			if !reflect.DeepEqual(g, w) {
+				t.Errorf("append: got %s want %s", got, tc.want)
+			}
+			if !reflect.DeepEqual(m, w) {
+				t.Errorf("map: got %s want %s", b, tc.want)
+			}
+		})
+	}
+}

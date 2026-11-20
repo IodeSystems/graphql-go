@@ -345,6 +345,30 @@ func isNullish(src interface{}) bool {
 	return false
 }
 
+// isNullishFor is isNullish for a resolved output value of type t. For
+// object, interface and union types a nil map is also null, like a nil
+// pointer. Scalars keep their value, since a custom scalar may accept a
+// nil map. Nil slices are not null: a nil slice for a list type is an
+// empty list (TestLists_ValueMayBeNilPointer).
+func isNullishFor(t Type, src interface{}) bool {
+	if isNullish(src) {
+		return true
+	}
+	switch t.(type) {
+	case *Object, *Interface, *Union:
+	default:
+		return false
+	}
+	switch v := src.(type) {
+	case map[string]interface{}:
+		return v == nil
+	case string, int, int64, float64, bool:
+		return false
+	}
+	rv := reflect.ValueOf(src)
+	return rv.Kind() == reflect.Map && rv.IsNil()
+}
+
 // Returns true if src is a slice or an array
 func isIterable(src interface{}) bool {
 	if src == nil {

@@ -973,7 +973,7 @@ func completePlannedValue(eCtx *executionContext, returnType Type, fp *fieldPlan
 		}
 		return completed
 	}
-	if isNullish(result) {
+	if isNullishFor(returnType, result) {
 		return nil
 	}
 	if rt, ok := returnType.(*List); ok {
@@ -1272,7 +1272,7 @@ func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, 
 	}
 
 	if rt, ok := returnType.(*NonNull); ok {
-		if isNullish(result) {
+		if isNullishFor(rt.OfType, result) {
 			err := NewLocatedErrorWithPath(
 				fmt.Sprintf("Cannot return null for non-nullable field %v.%v.", info.ParentType, info.FieldName),
 				FieldASTsToNodeASTs(fp.fieldASTs),
@@ -1283,7 +1283,7 @@ func writeCompleteValue(eCtx *executionContext, returnType Type, fp *fieldPlan, 
 		return writeCompleteValue(eCtx, rt.OfType, fp, info, result, dst, true)
 	}
 
-	if isNullish(result) {
+	if isNullishFor(returnType, result) {
 		return append(dst, "null"...)
 	}
 

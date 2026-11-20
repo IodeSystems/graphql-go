@@ -699,15 +699,16 @@ func init() {
 // | Number        | Int / Float          |
 
 func astFromValue(value interface{}, ttype Type) ast.Value {
+	if ttype, ok := ttype.(*NonNull); ok {
+		// A null under a non-null type has no literal.
+		val := astFromValue(value, ttype.OfType)
+		if _, isNull := val.(*ast.NullValue); isNull {
+			return nil
+		}
+		return val
+	}
 	if _, ok := value.(explicitNull); ok {
 		return ast.NewNullValue(nil)
-	}
-
-	if ttype, ok := ttype.(*NonNull); ok {
-		// Note: we're not checking that the result is non-null.
-		// This function is not responsible for validating the input value.
-		val := astFromValue(value, ttype.OfType)
-		return val
 	}
 	if isNullish(value) {
 		return nil
@@ -732,6 +733,13 @@ func astFromValue(value interface{}, ttype Type) ast.Value {
 			for i := 0; i < valueVal.Len(); i++ {
 				item := valueVal.Index(i).Interface()
 				itemAST := astFromValue(item, itemType)
+				if itemAST == nil && isNullish(item) {
+					// A nil list item is a null, not an absent one,
+					// unless the item type is non-null (no literal).
+					if _, nonNull := itemType.(*NonNull); !nonNull {
+						itemAST = ast.NewNullValue(nil)
+					}
+				}
 				if itemAST != nil {
 					values = append(values, itemAST)
 				}
@@ -747,8 +755,41 @@ func astFromValue(value interface{}, ttype Type) ast.Value {
 		return val
 	}
 
-	if valueVal.Type().Kind() == reflect.Map {
-		// TODO: implement astFromValue from Map to Value
+	if inType, ok := ttype.(*InputObject); ok {
+		// A key absent from the map is omitted; a key present with a
+		// nil value is null (graphql-js: undefined is omitted, null is
+		// kept). Only map[string]interface{} is converted.
+		m, ok := value.(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		fields := inType.Fields()
+		names := make([]string, 0, len(fields))
+		for name := range fields {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		var fieldASTs []*ast.ObjectField
+		for _, name := range names {
+			fv, present := m[name]
+			if !present {
+				continue
+			}
+			fieldAST := astFromValue(fv, fields[name].Type)
+			if fieldAST == nil && isNullish(fv) {
+				if _, nonNull := fields[name].Type.(*NonNull); !nonNull {
+					fieldAST = ast.NewNullValue(nil)
+				}
+			}
+			if fieldAST == nil {
+				continue
+			}
+			fieldASTs = append(fieldASTs, ast.NewObjectField(&ast.ObjectField{
+				Name:  ast.NewName(&ast.Name{Value: name}),
+				Value: fieldAST,
+			}))
+		}
+		return ast.NewObjectValue(&ast.ObjectValue{Fields: fieldASTs})
 	}
 
 	if value, ok := value.(bool); ok {

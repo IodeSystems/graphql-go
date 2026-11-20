@@ -3,6 +3,8 @@ package graphql
 import (
 	"math"
 	"testing"
+
+	"github.com/IodeSystems/graphql-go/v3/language/printer"
 )
 
 func TestAstFromValue_NonNull(t *testing.T) {
@@ -533,5 +535,43 @@ func TestIntrospection_SchemaSubscriptionType_WithSubscription(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil subscription type result")
+	}
+}
+
+func TestAstFromValue_Nulls(t *testing.T) {
+	in := NewInputObject(InputObjectConfig{
+		Name: "AstIn",
+		Fields: InputObjectConfigFieldMap{
+			"a": &InputObjectFieldConfig{Type: Int},
+			"b": &InputObjectFieldConfig{Type: Int},
+			"c": &InputObjectFieldConfig{Type: NewNonNull(Int)},
+		},
+	})
+	cases := []struct {
+		value interface{}
+		typ   Type
+		want  string // "" means no literal
+	}{
+		{[]interface{}{1, nil, 2}, NewList(Int), "[1, null, 2]"},
+		{[]interface{}{1, ExplicitNull}, NewList(Int), "[1, null]"},
+		{[]interface{}{1, nil, 2}, NewList(NewNonNull(Int)), "[1, 2]"},
+		{[]interface{}{nil}, NewList(NewList(Int)), "[null]"},
+		{ExplicitNull, NewNonNull(Int), ""},
+		{ExplicitNull, Int, "null"},
+		{map[string]interface{}{"a": 1, "b": nil}, in, "{a: 1, b: null}"},
+		{map[string]interface{}{"a": 1}, in, "{a: 1}"},
+		{map[string]interface{}{"c": nil}, in, "{}"},
+	}
+	for _, c := range cases {
+		got := astFromValue(c.value, c.typ)
+		if c.want == "" {
+			if got != nil {
+				t.Errorf("%v: want no literal, got %v", c.value, printer.Print(got))
+			}
+			continue
+		}
+		if got == nil || printer.Print(got) != c.want {
+			t.Errorf("%v: want %s, got %v", c.value, c.want, got)
+		}
 	}
 }

@@ -31,6 +31,9 @@ type Params struct {
 	// Context may be provided to pass application-specific per-request
 	// information to resolve functions.
 	Context context.Context
+
+	// AllowLossyInputCoercion: see ExecuteParams.AllowLossyInputCoercion.
+	AllowLossyInputCoercion bool
 }
 
 func Do(p Params) *Result {
@@ -112,5 +115,7 @@ func Do(p Params) *Result {
 		OperationName: p.OperationName,
 		Args:          p.VariableValues,
 		Context:       p.Context,
+
+		AllowLossyInputCoercion: p.AllowLossyInputCoercion,
 	})
 }

@@ -753,7 +753,7 @@ func ExecutePlan(plan *Plan, p ExecuteParams) (result *Result) {
 		// ignored to avoid silent drift if the caller passes a rebuilt
 		// schema with the same shape but different *Object pointers.
 		execSchema := *plan.schema
-		variableValues, err := getVariableValues(execSchema, plan.operation.GetVariableDefinitions(), p.Args)
+		variableValues, err := getVariableValues(execSchema, plan.operation.GetVariableDefinitions(), p.Args, p.AllowLossyInputCoercion)
 		if err != nil {
 			out.Errors = append(out.Errors, gqlerrors.FormatError(err))
 			return
@@ -1136,7 +1136,7 @@ func ExecutePlanAppend(plan *Plan, p ExecuteParams, dst []byte) ([]byte, []gqler
 	}
 
 	execSchema := *plan.schema
-	variableValues, err := getVariableValues(execSchema, plan.operation.GetVariableDefinitions(), p.Args)
+	variableValues, err := getVariableValues(execSchema, plan.operation.GetVariableDefinitions(), p.Args, p.AllowLossyInputCoercion)
 	if err != nil {
 		return dst, gqlerrors.FormatErrors(err)
 	}

@@ -33,6 +33,17 @@ type ExecuteParams struct {
 	// goroutine that outlives the resolver call. Applies to both
 	// ExecutePlan and ExecutePlanAppend.
 	RetainArgs bool
+
+	// AllowLossyInputCoercion restores the v2.1.1 lossy coercion of
+	// client-provided variables for the built-in Int, Float and ID
+	// scalars: Int truncates 2.5 to 2 and takes true/false as 1/0,
+	// Float takes booleans and numeric strings strconv.ParseFloat
+	// accepts, ID formats any value with %v. A value the default
+	// (lossless) coercion accepts coerces the same either way.
+	// Literals in the query text, synthetic variables hoisted by
+	// PlanCache normalization (names starting "__pcv"), and custom
+	// scalars are not affected.
+	AllowLossyInputCoercion bool
 }
 
 // Execute runs an operation against a schema. Behavior is unchanged
@@ -66,6 +77,8 @@ type buildExecutionCtxParams struct {
 	Args          map[string]interface{}
 	Result        *Result
 	Context       context.Context
+
+	AllowLossyInputCoercion bool
 }
 
 type executionContext struct {
@@ -194,7 +207,7 @@ func buildExecutionContext(p buildExecutionCtxParams) (*executionContext, error)
 		return nil, fmt.Errorf(`Must provide an operation.`)
 	}
 
-	variableValues, err := getVariableValues(p.Schema, operation.GetVariableDefinitions(), p.Args)
+	variableValues, err := getVariableValues(p.Schema, operation.GetVariableDefinitions(), p.Args, p.AllowLossyInputCoercion)
 	if err != nil {
 		return nil, err
 	}

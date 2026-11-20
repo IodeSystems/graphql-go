@@ -124,6 +124,8 @@ func DoAppend(p Params, dst []byte) []byte {
 		OperationName: p.OperationName,
 		Args:          p.VariableValues,
 		Context:       p.Context,
+
+		AllowLossyInputCoercion: p.AllowLossyInputCoercion,
 	}
 
 	plan, err := PlanQuery(&ep.Schema, ep.AST, ep.OperationName)

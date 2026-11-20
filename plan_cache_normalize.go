@@ -380,8 +380,12 @@ type normCtx struct {
 	newVarDefs []*ast.VariableDefinition
 }
 
+// synthVarPrefix starts every synthetic variable name. Variable
+// coercion keeps these strict under AllowLossyInputCoercion.
+const synthVarPrefix = "__pcv"
+
 func (c *normCtx) nextName() string {
-	n := fmt.Sprintf("__pcv%d", c.counter)
+	n := fmt.Sprintf(synthVarPrefix+"%d", c.counter)
 	c.counter++
 	return n
 }

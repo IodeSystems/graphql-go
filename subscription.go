@@ -60,6 +60,8 @@ func Subscribe(p Params) chan *Result {
 		OperationName: p.OperationName,
 		Args:          p.VariableValues,
 		Context:       p.Context,
+
+		AllowLossyInputCoercion: p.AllowLossyInputCoercion,
 	})
 }
 
@@ -89,6 +91,8 @@ func ExecuteSubscription(p ExecuteParams) chan *Result {
 			OperationName: p.OperationName,
 			Args:          p.Args,
 			Context:       p.Context,
+
+			AllowLossyInputCoercion: p.AllowLossyInputCoercion,
 		})
 	}
 	var resultChannel = make(chan *Result)
@@ -126,6 +130,8 @@ func ExecuteSubscription(p ExecuteParams) chan *Result {
 			OperationName: p.OperationName,
 			Args:          p.Args,
 			Context:       p.Context,
+
+			AllowLossyInputCoercion: p.AllowLossyInputCoercion,
 		})
 
 		if err != nil {

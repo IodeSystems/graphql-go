@@ -37,11 +37,12 @@ No linter, formatter, build step, or codegen. `go fmt` and `go vet` are the only
 - **`Plan.IsMutation()`** — whether the planned operation is a mutation, so a transport can refuse it on GET before executing.
 - **`ExplicitNull`** — set as `ArgumentConfig.DefaultValue` / `InputObjectFieldConfig.DefaultValue` to declare a `= null` default (nil means no default). Resolvers see the key with a nil value; introspection reports `"null"`. A `null` literal (`f(a: null)`) also puts the key in `Args` with a nil value; an absent argument leaves it out.
 
-### ExecuteParams flags (append-mode)
+### ExecuteParams flags
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `RetainArgs` | `false` | When false (default), the executor pools `ResolveParams.Args` via `sync.Pool`. Set true if resolvers retain `p.Args` past the call. |
+| `AllowLossyInputCoercion` | `false` | Also on `graphql.Params`. When true, client-provided variables for built-in Int, Float and ID fall back to the v2.1.1 lossy coercion (Int truncates 2.5 → 2, true → 1; Float takes booleans; ID takes any value via `%v`) when the default lossless coercion rejects them. Literals, PlanCache synthetic `__pcv*` variables and custom scalars stay strict. Applies to all executors. |
 
 `ResolveInfo.Path` and the `ResponsePath` type no longer exist — dropped in 682320e. Both walkers reconstruct `errors[].path` from the internal `pathBuf` depth-stack via `executionContext.errorPathArray`; there is no resolver-side path accessor.
 

@@ -20,7 +20,7 @@ import (
 func getVariableValues(
 	schema Schema,
 	definitionASTs []*ast.VariableDefinition,
-	inputs map[string]interface{}) (_ map[string]interface{}, err error) {
+	inputs map[string]interface{}, lossy bool) (_ map[string]interface{}, err error) {
 	// Custom scalar ParseValue may panic; report it as an error so
 	// callers outside a recovering goroutine (ExecutePlanAppend) survive.
 	defer func() {
@@ -42,7 +42,10 @@ func getVariableValues(
 		}
 		varName := defAST.Variable.Name.Value
 		input, hasValue := inputs[varName]
-		varValue, present, err := getVariableValue(schema, defAST, input, hasValue)
+		// Synthetic variables hoisted from literals by PlanCache
+		// normalization stay strict, like the literals they replace.
+		lossyVar := lossy && !strings.HasPrefix(varName, synthVarPrefix)
+		varValue, present, err := getVariableValue(schema, defAST, input, hasValue, lossyVar)
 		if err != nil {
 			return values, err
 		}
@@ -161,7 +164,7 @@ func isNullLiteral(v ast.Value) bool {
 // whether the request supplied the variable at all; present says
 // whether the variable has a value (possibly nil, for null) after
 // defaults (spec CoerceVariableValues).
-func getVariableValue(schema Schema, definitionAST *ast.VariableDefinition, input interface{}, hasValue bool) (value interface{}, present bool, err error) {
+func getVariableValue(schema Schema, definitionAST *ast.VariableDefinition, input interface{}, hasValue bool, lossy bool) (value interface{}, present bool, err error) {
 	ttype, err := typeFromAST(schema, definitionAST.Type)
 	if err != nil {
 		return nil, false, err
@@ -183,12 +186,12 @@ func getVariableValue(schema Schema, definitionAST *ast.VariableDefinition, inpu
 	if !hasValue && definitionAST.DefaultValue != nil {
 		return valueFromAST(definitionAST.DefaultValue, ttype, nil), true, nil
 	}
-	isValid, messages := isValidInputValue(input, ttype)
+	isValid, messages := isValidInputValue(input, ttype, lossy)
 	if isValid {
 		if !hasValue {
 			return nil, false, nil
 		}
-		return coerceValue(ttype, input), true, nil
+		return coerceValue(ttype, input, lossy), true, nil
 	}
 	if isNullish(input) {
 		return "", false, gqlerrors.NewError(
@@ -223,24 +226,24 @@ func getVariableValue(schema Schema, definitionAST *ast.VariableDefinition, inpu
 }
 
 // Given a type and any value, return a runtime value coerced to match the type.
-func coerceValue(ttype Input, value interface{}) interface{} {
+func coerceValue(ttype Input, value interface{}, lossy bool) interface{} {
 	if isNullish(value) {
 		return nil
 	}
 	switch ttype := ttype.(type) {
 	case *NonNull:
-		return coerceValue(ttype.OfType, value)
+		return coerceValue(ttype.OfType, value, lossy)
 	case *List:
 		var values = []interface{}{}
 		valType := reflect.ValueOf(value)
 		if valType.Kind() == reflect.Slice {
 			for i := 0; i < valType.Len(); i++ {
 				val := valType.Index(i).Interface()
-				values = append(values, coerceValue(ttype.OfType, val))
+				values = append(values, coerceValue(ttype.OfType, val, lossy))
 			}
 			return values
 		}
-		return append(values, coerceValue(ttype.OfType, value))
+		return append(values, coerceValue(ttype.OfType, value, lossy))
 	case *InputObject:
 		var obj = map[string]interface{}{}
 		valueMap, _ := value.(map[string]interface{})
@@ -256,7 +259,7 @@ func coerceValue(ttype Input, value interface{}) interface{} {
 				obj[name] = nil
 				continue
 			}
-			fieldValue := coerceValue(field.Type, value)
+			fieldValue := coerceValue(field.Type, value, lossy)
 			if isNullish(fieldValue) {
 				def, hasDefault := defaultValue(field.DefaultValue)
 				if hasDefault || presentInValueMap {
@@ -268,7 +271,7 @@ func coerceValue(ttype Input, value interface{}) interface{} {
 		}
 		return obj
 	case *Scalar:
-		if parsed := ttype.ParseValue(value); !isNullish(parsed) {
+		if parsed := ttype.parseVariable(value, lossy); !isNullish(parsed) {
 			return parsed
 		}
 	case *Enum:
@@ -313,7 +316,7 @@ func typeFromAST(schema Schema, inputTypeAST ast.Type) (Type, error) {
 // Given a value and a GraphQL type, determine if the value will be
 // accepted for that type. This is primarily useful for validating the
 // runtime values of query variables.
-func isValidInputValue(value interface{}, ttype Input) (bool, []string) {
+func isValidInputValue(value interface{}, ttype Input, lossy bool) (bool, []string) {
 	if isNullish(value) {
 		if ttype, ok := ttype.(*NonNull); ok {
 			if ttype.OfType.Name() != "" {
@@ -325,7 +328,7 @@ func isValidInputValue(value interface{}, ttype Input) (bool, []string) {
 	}
 	switch ttype := ttype.(type) {
 	case *NonNull:
-		return isValidInputValue(value, ttype.OfType)
+		return isValidInputValue(value, ttype.OfType, lossy)
 	case *List:
 		valType := reflect.ValueOf(value)
 		if valType.Kind() == reflect.Ptr {
@@ -335,14 +338,14 @@ func isValidInputValue(value interface{}, ttype Input) (bool, []string) {
 			messagesReduce := []string{}
 			for i := 0; i < valType.Len(); i++ {
 				val := valType.Index(i).Interface()
-				_, messages := isValidInputValue(val, ttype.OfType)
+				_, messages := isValidInputValue(val, ttype.OfType, lossy)
 				for _, message := range messages {
 					messagesReduce = append(messagesReduce, fmt.Sprintf(`In element #%v: %v`, i, message))
 				}
 			}
 			return (len(messagesReduce) == 0), messagesReduce
 		}
-		return isValidInputValue(value, ttype.OfType)
+		return isValidInputValue(value, ttype.OfType, lossy)
 
 	case *InputObject:
 		messagesReduce := []string{}
@@ -381,7 +384,7 @@ func isValidInputValue(value interface{}, ttype Input) (bool, []string) {
 				// Omitted with a default: the default applies.
 				continue
 			}
-			_, messages := isValidInputValue(fieldValue, fields[fieldName].Type)
+			_, messages := isValidInputValue(fieldValue, fields[fieldName].Type, lossy)
 			if messages != nil {
 				for _, message := range messages {
 					messagesReduce = append(messagesReduce, fmt.Sprintf(`In field "%v": %v`, fieldName, message))
@@ -390,7 +393,7 @@ func isValidInputValue(value interface{}, ttype Input) (bool, []string) {
 		}
 		return (len(messagesReduce) == 0), messagesReduce
 	case *Scalar:
-		if parsedVal := ttype.ParseValue(value); isNullish(parsedVal) {
+		if parsedVal := ttype.parseVariable(value, lossy); isNullish(parsedVal) {
 			return false, []string{fmt.Sprintf(`Expected type "%v", found "%v".`, ttype.Name(), value)}
 		}
 	case *Enum:

@@ -212,6 +212,11 @@ type Scalar struct {
 	// error into a field error. Custom scalars leave it nil, so their
 	// Serialize returning nil still means null with no error.
 	serializeStrict func(interface{}) (interface{}, error)
+
+	// parseValueLossy is set only on Int, Float and ID: the v2.1.1
+	// ParseValue, used for a variable the strict ParseValue rejected
+	// when the request sets AllowLossyInputCoercion.
+	parseValueLossy ParseValueFn
 }
 
 // SerializeFn is a function type for serializing a GraphQLScalar type value
@@ -300,6 +305,17 @@ func (st *Scalar) ParseValue(value interface{}) interface{} {
 	}
 	return st.scalarConfig.ParseValue(value)
 }
+
+// parseVariable is ParseValue for a client-provided variable. lossy
+// falls back to parseValueLossy when ParseValue rejects the value.
+func (st *Scalar) parseVariable(value interface{}, lossy bool) interface{} {
+	parsed := st.ParseValue(value)
+	if lossy && st.parseValueLossy != nil && isNullish(parsed) {
+		return st.parseValueLossy(value)
+	}
+	return parsed
+}
+
 func (st *Scalar) ParseLiteral(valueAST ast.Value) interface{} {
 	if st.scalarConfig.ParseLiteral == nil {
 		return nil
